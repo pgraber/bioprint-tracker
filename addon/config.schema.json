@@ -1,0 +1,8 @@
+{
+  "pdfFolderID": {
+    "type": "integer",
+    "title": "Folder for uploaded files (optional)",
+    "description": "Leave blank to save uploaded files (PDFs, print files, CSVs) in the main file area. To keep them together in one folder instead, enter that folder's number here. eLabNext doesn't show folder numbers directly, so to find it: in the add-on, open 'Set up / check' and choose 'Find file folder number', then copy the number shown next to a file in your folder.",
+    "required": false
+  }
+}
