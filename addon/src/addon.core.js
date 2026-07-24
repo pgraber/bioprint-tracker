@@ -2467,7 +2467,7 @@ var BioprintTracker = {};
           const inp = document.createElement('input');
           inp.type = 'text';
           inp.className = `bpt-inp bpt-lot-${kind}`;
-          inp.placeholder = kind === 'bioink' ? 'e.g. BX1' : 'e.g. F176-A3';
+          inp.placeholder = kind === 'bioink' ? 'e.g. INK1042' : 'e.g. INK2091';
           wrap.appendChild(inp);
           if (focus) inp.focus();
         }
