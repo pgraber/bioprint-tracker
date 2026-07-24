@@ -296,17 +296,24 @@ var BioprintTracker = {};
       if (typeID == null || typeID === '') {
         throw new Error(`Sample type "${name}" was created but no ID came back.`);
       }
-      let chain = Promise.resolve();
-      (fields || []).forEach(f => {
-        chain = chain.then(() => apiCall('POST', `sampleTypes/${typeID}/meta`,
-          { key: f.key, sampleDataType: f.type }));
-      });
-      return chain.then(() => ({
+      return addFieldsToType(typeID, fields).then(() => ({
         name,
         typeID,
         fieldCount: (fields || []).length
       }));
     });
+  }
+
+  // Add fields to an existing sample type, one at a time (POST /sampleTypes/{id}/meta) so a failure
+  // names the field that broke. Adding a field is non-destructive: it never touches existing fields or
+  // data. Used both when creating a type and when topping up a type that is missing fields.
+  function addFieldsToType(typeID, fields) {
+    let chain = Promise.resolve();
+    (fields || []).forEach(f => {
+      chain = chain.then(() => apiCall('POST', `sampleTypes/${typeID}/meta`,
+        { key: f.key, sampleDataType: f.type }));
+    });
+    return chain;
   }
 
   // eLabNext's own words for a field's data type, for plain-language messages (the raw API values are
@@ -362,9 +369,10 @@ var BioprintTracker = {};
   // the entry is left exactly as before (by-name), and the $expand=meta read-back guard still catches a
   // genuine mismatch. VERIFY on the tenant that ID-matched values actually persist.
   const sampleTypeMetaMapCache = {};
-  function getSampleTypeMetaMap(typeID) {
+  function getSampleTypeMetaMap(typeID, force) {
     if (!typeID) return Promise.resolve(null);
-    if (sampleTypeMetaMapCache[typeID]) return Promise.resolve(sampleTypeMetaMapCache[typeID]);
+    // `force` re-reads from the server (used after setup adds fields, so the cached map isn't stale).
+    if (!force && sampleTypeMetaMapCache[typeID]) return Promise.resolve(sampleTypeMetaMapCache[typeID]);
     // $records: 1000 because list endpoints paginate at 10 by default, a type has more fields than
     // that, so without it the tail of the field list (hence its IDs) would silently be missing.
     return apiCall('GET', `sampleTypes/${typeID}/meta`, null, { '$records': 1000 })
@@ -1674,51 +1682,51 @@ var BioprintTracker = {};
   function renderSampleTypeResults(boxId, results) {
     const box = document.getElementById(boxId);
     if (!box) return;
+    // Inline coloured text (not the .bpt-error alert box, which would render as a full red panel).
+    const BAD = 'color:#b91c1c;font-weight:600', GOOD = 'color:#15803d;font-weight:600';
     let anyForbidden = false, anyProblem = false;
     const rows = results.map(r => {
       let status = '', note = '';
       if (r.action === 'forbidden') {
         anyForbidden = true;
-        status = '<span class="bpt-error">Not created — you need an admin account</span>';
+        status = `<span style="${BAD}">Not done (needs an admin account)</span>`;
       } else if (r.action === 'failed') {
         anyProblem = true;
-        status = '<span class="bpt-error">Something went wrong</span>';
+        status = `<span style="${BAD}">Something went wrong</span>`;
         note = esc(r.error || '');
       } else if (r.action === 'missing') {
         anyProblem = true;
-        status = '<span class="bpt-error">Not set up yet</span>';
+        status = `<span style="${BAD}">Not set up yet</span>`;
         note = 'This type does not exist. Run the setup to create it.';
       } else {
-        // created or exists, show the field check.
-        const base = r.action === 'created' ? 'Created' : 'Already there';
+        // created / updated / exists: show the field check.
+        const base = r.action === 'created' ? 'Created' : (r.action === 'updated' ? 'Updated' : 'Already set up');
         const c = r.check || {};
+        const added = (r.added && r.added.length) ? `Added ${r.added.length} field(s): ${esc(r.added.join(', '))}.` : '';
         if (c.readFailed) {
-          status = `${base} — but its fields could not be checked`;
+          status = base;
+          note = `${added} Could not re-check the fields.`.trim();
         } else if ((c.missing && c.missing.length) || (c.mismatched && c.mismatched.length)) {
           anyProblem = true;
-          status = `<span class="bpt-error">${base} — needs attention</span>`;
+          status = `<span style="${BAD}">${base}, needs attention</span>`;
           const parts = [];
-          if (c.missing && c.missing.length) {
-            parts.push(`Missing ${c.missing.length} field(s): ${esc(c.missing.join(', '))}`);
-          }
-          if (c.mismatched && c.mismatched.length) {
-            parts.push(`Wrong type: ${esc(c.mismatched.map(m => `${m.key} (should be ${prettyType(m.expected)}, is ${prettyType(m.got)})`).join('; '))}`);
-          }
-          note = parts.join('. ');
+          if (added) parts.push(added);
+          if (c.missing && c.missing.length) parts.push(`Still missing: ${esc(c.missing.join(', '))}`);
+          if (c.mismatched && c.mismatched.length) parts.push(`Wrong type: ${esc(c.mismatched.map(m => `${m.key} (should be ${prettyType(m.expected)}, is ${prettyType(m.got)})`).join('; '))}`);
+          note = parts.join(' ');
         } else {
-          status = `${base} — all ${esc(c.ok)} fields are correct`;
+          status = `<span style="${GOOD}">${base}, all ${esc(c.ok)} fields correct</span>`;
+          if (added) note = added;
         }
       }
       return `<tr><td>${esc(r.name)}</td><td>${status}${note ? `<br><span class="bpt-hint">${note}</span>` : ''}</td></tr>`;
     }).join('');
     const footer = anyForbidden
-      ? '<p class="bpt-hint">Only an administrator can create sample types. Ask an admin to open ' +
-        'Inventory and add <code>#bioprinting-setup-types</code> to the web address, or to create the ' +
-        'types by hand (see the setup guide).</p>'
+      ? '<p class="bpt-hint">Creating or changing sample types requires an <b>administrator</b> account. ' +
+        'Ask an admin to run this (open Inventory with <code>#bioprinting-setup-types</code> in the address).</p>'
       : anyProblem
-        ? '<p class="bpt-hint">The items above need to be fixed by hand in <b>Configuration → Sample ' +
-          'types</b>: add any missing field with the exact name and type shown. Then run this again to ' +
-          'confirm.</p>'
+        ? '<p class="bpt-hint">Fix the items marked above by hand in <b>Configuration → Sample types</b> ' +
+          '(add any still-missing field, or correct a wrong-type field), then run this again to confirm.</p>'
         : '<p class="bpt-hint">Everything is set up correctly. You can start uploading protocols and ' +
           'logging print runs.</p>';
     box.innerHTML = `<table class="bpt-table"><tr><th>Sample type</th><th>Status</th></tr>${rows}</table>${footer}`;
@@ -1728,7 +1736,8 @@ var BioprintTracker = {};
   // create the two required sample types and their fields, so an admin doesn't have to build them by
   // hand, then check every field came through with the right type. No client-side role gate (there is
   // no working role API, see isForbidden); it attempts creation and reports a 403 as "needs an admin
-  // account". A type that already exists is left as is and just checked.
+  // account". A type that already exists has any MISSING fields added, then is re-checked; a field that
+  // exists with the wrong type is reported, not changed (changing a field's type is not safe to automate).
   addon.setupSampleTypes = () => {
     const names = Object.keys(REQUIRED_SAMPLE_TYPE_FIELDS);
     showDialog({ width: 560, title: 'Set up sample types',
@@ -1739,10 +1748,22 @@ var BioprintTracker = {};
     names.forEach(name => {
       chain = chain.then(() => {
         const required = REQUIRED_SAMPLE_TYPE_FIELDS[name];
-        // If the type resolves by name it already exists, leave it and just check its fields.
-        // Otherwise create it, then check what was actually created.
+        // If the type exists, top up any MISSING fields (adding a field is non-destructive), then
+        // re-check. If it does not exist, create it with all its fields. A field that exists with the
+        // WRONG type is reported, not auto-changed (changing a field's type is not safe to automate).
         return resolveSampleTypeID(0, name).then(id => getSampleTypeMetaMap(id).then(map => {
-          results.push({ name, action: 'exists', typeID: id, check: checkTypeFields(map, required) });
+          const check = checkTypeFields(map, required);
+          const missing = (check && check.missing) || [];
+          if ((check && check.readFailed) || !missing.length) {
+            results.push({ name, action: 'exists', typeID: id, check });
+            return undefined;
+          }
+          const toAdd = required.filter(f => missing.indexOf(f.key) !== -1);
+          return addFieldsToType(id, toAdd).then(() => getSampleTypeMetaMap(id, true).then(map2 => {
+            results.push({ name, action: 'updated', typeID: id, added: toAdd.map(f => f.key), check: checkTypeFields(map2, required) });
+          }), err => {
+            results.push({ name, action: isForbidden(err) ? 'forbidden' : 'failed', error: err.message });
+          });
         }), () => createSampleTypeWithFields(name, required, REQUIRED_SAMPLE_TYPE_DESCRIPTIONS[name]).then(r => getSampleTypeMetaMap(r.typeID).then(map => {
           results.push({ name, action: 'created', typeID: r.typeID,
             fieldCount: r.fieldCount, check: checkTypeFields(map, required) });
