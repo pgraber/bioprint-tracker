@@ -30,9 +30,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
  * An eLabNext (SciSure) add-on that reads a RASTRUM/Allegro ".rastrum" print file in the browser and
  * registers it in Inventory, giving printed plates a shared, barcoded record instead of ad hoc tracking.
  *
- * Build: this file (src/addon.core.js) is the source and is not uploaded. The uploadable file is
- * addon/addon.js, produced by addon/build.sh, which inlines JSZip and js-yaml from lib/ into one
- * self-contained file (no CDN dependency). Workflow: edit src, run build.sh, upload addon/addon.js.
+ * Build: edit this source, then run addon/build.sh to regenerate the uploadable addon/addon.js.
  *
  * Data model:
  *   Protocol -> an Inventory Sample of type "Bioprint Template" (a reusable print design parsed once
