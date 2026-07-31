@@ -197,6 +197,25 @@ section('applyConfig: fold a stored configuration onto the live CONFIG block');
   T.CONFIG.PDF_FOLDER_ID = before;
 })();
 
+// ── I. shortenMiddle ────────────────────────────────────────────────────────────────
+// Print filenames are long and share long prefixes, so the folder table shortens them from the
+// middle: cutting the end would leave a column of names that all read the same.
+section('shortenMiddle: keep both ends of a long filename');
+(function () {
+  eq(T.shortenMiddle('short.csv', 30), 'short.csv', 'a name within the limit is untouched');
+  const long = '2026-07-22_Allegro_newconfig_4f8b7f_wellplate.csv';
+  const cut = T.shortenMiddle(long, 30);
+  eq(cut.length, 30, 'the result is exactly the limit');
+  ok(cut.indexOf('…') !== -1, 'the removed middle is marked with an ellipsis');
+  ok(cut.indexOf('2026-07-22') === 0, 'the start is kept');
+  ok(/wellplate\.csv$/.test(cut), 'the distinguishing tail is kept');
+  // Two names sharing a long prefix must not collapse to the same shortened string.
+  ok(T.shortenMiddle('2026-07-22_Allegro_newconfig_4f8b7f_wellplate.csv', 30) !==
+     T.shortenMiddle('2026-07-22_Allegro_newconfig_4f8b7f_platemap.pdf', 30),
+    'names with a shared prefix stay distinguishable');
+  eq(T.shortenMiddle(null, 30), '', 'a missing name yields an empty string, not "null"');
+})();
+
 console.log('\n' + (failed === 0 ? '✓ ALL PASSED' : '✗ FAILURES') +
   ' — ' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed === 0 ? 0 : 1);

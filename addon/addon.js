@@ -1468,6 +1468,11 @@ var BioprintTracker = {};
       '.bpt-wiz-dots{gap:0;}' +
       '.bpt-wiz-dot:hover,.bpt-wiz-dot:focus{outline:2px solid #c7d2fe;outline-offset:-4px;}' +
       '.bpt-wiz-approve-row{display:flex;justify-content:center;margin-top:10px;}' +
+      '.bpt-steps>div{margin:0 0 6px;}' +
+      // table-layout:fixed makes the <colgroup> widths bind; without it a long filename widens its
+      // own column and squeezes the folder number and the button out of shape.
+      '.bpt-folder-table{table-layout:fixed;width:100%;}' +
+      '.bpt-folder-table td,.bpt-folder-table th{vertical-align:middle;}' +
       '.bpt-wiz-approve{border-color:#4f46e5;color:#4338ca;}' +
       '.bpt-wiz-approve.done{background:#dcfce7;border-color:#16a34a;color:#15803d;}' +
       '.bpt-wiz-status{font-size:12px;color:#475569;margin-top:8px;text-align:center;}' +
@@ -1763,6 +1768,17 @@ var BioprintTracker = {};
   // therefore identified by an EXAMPLE FILENAME they contain: recognising a file you put there is how
   // you tell one folder from another. A folder with no files in it cannot appear at all, which is why
   // the dialog also offers manual entry. Busiest folder first. Pure, so it is unit-tested.
+  // Shorten a filename from the MIDDLE, so both the start and the distinguishing tail survive
+  // ("2026-07-22_Allegro_newconfig_4f8b7f_wellplate.csv" -> "2026-07-22_Alle…_wellplate.csv"). Cutting
+  // the end instead would leave a column of names that all begin identically and cannot be told apart.
+  function shortenMiddle(name, max) {
+    const s = String(name == null ? '' : name);
+    if (s.length <= max) return s;
+    const keepEnd = Math.max(6, Math.floor((max - 1) / 2));
+    const keepStart = max - 1 - keepEnd;
+    return `${s.slice(0, keepStart)}…${s.slice(s.length - keepEnd)}`;
+  }
+
   function groupFilesByFolder(files) {
     const byFolder = {}, order = [];
     (files || []).forEach(f => {
@@ -1794,11 +1810,14 @@ var BioprintTracker = {};
         `<p class="bpt-hint" style="margin:0 0 10px;">Files are being saved in: <b id="bpt-folder-current">${describe(current)}</b>.</p>` +
         '<p class="bpt-hint" style="margin:0 0 12px;">Keeping uploaded files in one folder needs that ' +
         'folder’s <b>number</b>. eLabNext doesn’t show folder numbers directly, so:</p>' +
-        '<ol class="bpt-hint" style="margin:0 0 12px 18px;padding:0;">' +
-          '<li>In <b>Data Storage</b>, open the folder you want to use and put any file in it (for ' +
-            'example a file called <code>bioprinting.txt</code>).</li>' +
-          '<li>Find that file in the list below and press <b>Use this folder</b> next to it.</li>' +
-        '</ol>' +
+        // Steps are numbered in the markup rather than by <ol>: the host stylesheet strips list
+        // markers, which left the instructions as unnumbered indented lines.
+        '<div class="bpt-hint bpt-steps">' +
+          '<div><b>1.</b> In <b>Data Storage</b>, open the folder you want to use and put any file ' +
+            'in it (for example a file called <code>bioprinting.txt</code>).</div>' +
+          '<div><b>2.</b> Find that file in the list below and press <b>Use this folder</b> next ' +
+            'to it.</div>' +
+        '</div>' +
         '<div id="bpt-folder-list"><p class="bpt-hint">Loading folders…</p></div>' +
         '<div id="bpt-folder-status" style="margin:10px 0 0;"></div>',
       // There is deliberately no "type a folder number" box. A typed number cannot be checked: there
@@ -1831,15 +1850,21 @@ var BioprintTracker = {};
               'Put a file into the folder you want to use in Data Storage, then open this again.</p>';
             return;
           }
-          box.innerHTML = `<table class="bpt-table"><tr><th>Folder number</th><th>Example file(s) in it</th><th>Files</th><th></th></tr>${rows.map(r => {
+          box.innerHTML = `<table class="bpt-table bpt-folder-table"><colgroup><col style="width:88px;"><col><col style="width:48px;"><col style="width:124px;"></colgroup><tr><th>Folder</th><th>Example file(s) in it</th><th>Files</th><th></th></tr>${rows.map(r => {
             const label = r.id === 0 ? '<i>main file area</i>' : esc(r.id);
             const isCur = String(r.id) === String(current) || (r.id === 0 && !current);
+            // Print filenames are long (a full RASTRUM export name runs past 40 characters), and
+            // three of them wrapped over several lines and crushed the other columns. Two, each
+            // shortened in the middle so the distinctive tail stays visible, is enough to recognise
+            // a folder by. The full list is on the cell's tooltip.
+            const shown = r.names.slice(0, 2).map(n => shortenMiddle(n, 30));
             const eg = r.names.length
-              ? esc(r.names.join(', ')) + (r.count > r.names.length ? ', …' : '')
+              ? esc(shown.join(', ')) + (r.count > shown.length ? ', …' : '')
               : '—';
+            const egFull = r.names.length ? ` title="${esc(r.names.join(', '))}"` : '';
             // The "in use" mark lives with the folder name, not in the button column, so it is still
             // shown when saving is unavailable (side-loading) and that column is empty.
-            const mark = isCur ? ' <b style="color:#15803d;white-space:nowrap;">✓ in use</b>' : '';
+            const mark = isCur ? '<div style="color:#15803d;font-weight:700;font-size:11px;">✓ in use</div>' : '';
             const action = (!installedRecord || isCur) ? ''
               : `<button type="button" class="bpt-btn bpt-btn-secondary" style="margin:0;padding:5px 10px;white-space:nowrap;" data-bpt-folder="${esc(r.id)}">Use this folder</button>`;
             // The chosen row is marked three ways (tint, left rule, and the tick) rather than by
@@ -1847,7 +1872,7 @@ var BioprintTracker = {};
             const rowStyle = isCur
               ? ' style="background:#eef6ff;box-shadow:inset 3px 0 0 #4f46e5;"'
               : '';
-            return `<tr${rowStyle}><td><b>${label}</b>${mark}</td><td style="word-break:break-all;">${eg}</td><td>${esc(r.count)}</td><td>${action}</td></tr>`;
+            return `<tr${rowStyle}><td style="white-space:nowrap;"><b>${label}</b>${mark}</td><td style="overflow-wrap:anywhere;"${egFull}>${eg}</td><td>${esc(r.count)}</td><td>${action}</td></tr>`;
           }).join('')}</table>`;
           const btns = document.querySelectorAll('[data-bpt-folder]');
           Array.prototype.forEach.call(btns, b => {
@@ -3214,6 +3239,7 @@ var BioprintTracker = {};
       getSampleById,
       stampMetaIDs,
       groupFilesByFolder,
+      shortenMiddle,
       getInstalledAddon,
       readStoredConfig,
       saveStoredConfig,
