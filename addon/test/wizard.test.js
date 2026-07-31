@@ -136,18 +136,50 @@ function statusText() { var s = document.getElementById('bpt-wiz-status'); retur
   // ── 3b. Clicking an already-approved button toggles it back off, staying on the same plate ──────
   section('Clicking "✓ Approved" again un-approves the plate without advancing');
   setInput('.bpt-pl-cellline', 'Cell A'); setInput('.bpt-pl-conc', '2000000'); // restore a valid value
-  approveBtn().click(); await tick();          // approve plate 1 again -> advances to plate 2
+  approveBtn().click(); await tick();          // approve plate 1 again
+  ok(/Plate 1 of 2/.test(document.getElementById('bpt-plate-area').textContent),
+    'approving stays on the current plate (it does not navigate)');
+  document.getElementById('bpt-wiz-next').click(); // forward by the nav control
+  ok(/Plate 2 of 2/.test(document.getElementById('bpt-plate-area').textContent), 'Next moves forward');
   document.getElementById('bpt-wiz-prev').click(); // back to plate 1
   ok(/✓ Approved/.test(approveBtn().textContent), 'plate 1 is approved again before the toggle test');
   approveBtn().click();                        // click the ALREADY-approved button
   ok(!/Approved/.test(approveBtn().textContent), 'clicking it again un-approves the plate (toggle)');
   ok(/Plate 1 of 2/.test(document.getElementById('bpt-plate-area').textContent),
-    'un-approving via the button stays on the same plate (only approving advances)');
+    'un-approving stays on the same plate');
+
+  // ── 3b. Navigation and approval are INDEPENDENT ─────────────────────────────────
+  // The trap this replaced: approving was the only way to advance, and an approved plate's button
+  // un-approved instead, so returning to an earlier plate left no way forward except withdrawing and
+  // re-granting approval. Moving must never change approval, in either direction.
+  section('Moving between plates never changes approval state');
+  setInput('.bpt-pl-cellline', 'Cell A');
+  setInput('.bpt-pl-conc', '2000000');
+  approveBtn().click(); await tick();          // plate 1 approved, still on plate 1
+  document.getElementById('bpt-wiz-next').click();
+  ok(/Plate 2 of 2/.test(document.getElementById('bpt-plate-area').textContent), 'moved to plate 2');
+  ok(!/Approved/.test(approveBtn().textContent), 'plate 2 is untouched by the move (not approved)');
+  document.getElementById('bpt-wiz-prev').click();
+  ok(/✓ Approved/.test(approveBtn().textContent), 'plate 1 kept its approval across the round trip');
+  // The ends are closed off rather than silently doing nothing.
+  ok(document.getElementById('bpt-wiz-prev').disabled, 'Back is disabled on the first plate');
+  document.getElementById('bpt-wiz-next').click();
+  ok(document.getElementById('bpt-wiz-next').disabled, 'Next is disabled on the last plate');
+  // A dot jumps straight to its plate, which is the fast route once there are several.
+  document.querySelectorAll('#bpt-plate-area .bpt-wiz-dot')[0].click();
+  ok(/Plate 1 of 2/.test(document.getElementById('bpt-plate-area').textContent), 'clicking a dot jumps to that plate');
+  ok(/✓ Approved/.test(approveBtn().textContent), 'jumping by dot does not change approval either');
+  // Anything typed is kept when moving away and coming back.
+  setInput('.bpt-pl-passage', '17');
+  document.querySelectorAll('#bpt-plate-area .bpt-wiz-dot')[1].click();
+  document.querySelectorAll('#bpt-plate-area .bpt-wiz-dot')[0].click();
+  eq($('.bpt-pl-passage').value, '17', 'field values survive navigating away and back');
 
   // ── 4. Per-plate concentration differs (the #3 payoff) ──────────────────────────
   section('Plate 2 keeps its OWN concentration, not the protocol default');
   setInput('.bpt-pl-cellline', 'Cell A');      // restore plate 1
-  approveBtn().click(); await tick();          // approve plate 1 -> advance to plate 2
+  approveBtn().click(); await tick();          // approve plate 1
+  document.getElementById('bpt-wiz-next').click();
   ok(/Plate 2 of 2/.test(document.getElementById('bpt-plate-area').textContent), 'now on plate 2');
   eq($('.bpt-pl-conc').value, '3000000', 'plate 2 pre-fills 3M (its own), not the 2M protocol default');
 
@@ -173,6 +205,7 @@ function statusText() { var s = document.getElementById('bpt-wiz-status'); retur
   api.failPostAt = 2;                           // the second POST will reject
   // approve both plates
   setInput('.bpt-pl-cellline', 'Cell A'); setInput('.bpt-pl-conc', '2000000'); approveBtn().click(); await tick();
+  document.getElementById('bpt-wiz-next').click();
   setInput('.bpt-pl-cellline', 'Cell B'); setInput('.bpt-pl-conc', '3000000'); approveBtn().click(); await tick();
   document.getElementById('bpt-btn-0').click(); await settle();
   eq(api.posts, 2, 'attempted both (second failed)');
@@ -213,8 +246,14 @@ function statusText() { var s = document.getElementById('bpt-wiz-status'); retur
   ok(ftable, 'folder table rendered');
   ok(/42/.test(ftable.textContent), 'a real folder ID (42) is listed');
   ok(/bioprinting\.txt/.test(ftable.textContent), 'an example filename is shown so the folder is recognisable');
-  ok(/main file area/.test(ftable.textContent) && /← current/.test(ftable.textContent),
-    'main-file-area row shown and marked current (no folder configured)');
+  ok(/main file area/.test(ftable.textContent) && /in use/.test(ftable.textContent),
+    'main-file-area row shown and marked in use (no folder configured)');
+  // The "in use" mark must survive the case where saving is unavailable, which is what this harness
+  // simulates: there is no installed-add-on record, so the button column is empty.
+  ok(ftable.querySelectorAll('[data-bpt-folder]').length === 0,
+    'no save buttons offered when the add-on has no installed record (side-loading)');
+  ok(!/enter a folder number/i.test(document.body.textContent),
+    'no free-text folder-number box (an unvalidatable number would be permanent, files cannot be moved)');
 
   // ── 10. Launcher setup nudge: appears only when the group is NOT set up ──────────
   section('Launcher shows a setup nudge only when the group is not set up');
@@ -239,7 +278,7 @@ function statusText() { var s = document.getElementById('bpt-wiz-status'); retur
     document.querySelectorAll('.bpt-card-footer .bpt-btn-primary'), function (b) { return b.textContent; });
   ok(hubBtns.indexOf('Set up sample types') !== -1, 'hub offers "Set up sample types"');
   ok(hubBtns.indexOf('Check sample types') !== -1, 'hub offers "Check sample types"');
-  ok(hubBtns.indexOf('Find file folder number') !== -1, 'hub offers "Find file folder number"');
+  ok(hubBtns.indexOf('Choose file folder') !== -1, 'hub offers "Choose file folder"');
   // A setup sub-dialog's cancel button must go BACK to the hub, not exit the whole thing.
   addon.showFolderIdFinder();
   await settle();

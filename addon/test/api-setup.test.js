@@ -125,6 +125,78 @@ section('prettyType: human labels for API data-type codes');
   eq(T.prettyType('WEIRD'), 'WEIRD', 'unknown code passes through unchanged');
 })();
 
+// ── F. groupFilesByFolder ───────────────────────────────────────────────────────────
+// The folder finder can only surface a Data Storage folder by reading the folderID off files that
+// already sit in it: there is no list-folders and no folder-by-name endpoint.
+section('groupFilesByFolder: collapse a file list into one row per folder');
+(function () {
+  const rows = T.groupFilesByFolder([
+    { folderID: 87, filename: 'a.pdf' },
+    { folderID: 87, filename: 'b.pdf' },
+    { folderID: 87, filename: 'c.pdf' },
+    { folderID: 87, filename: 'd.pdf' },
+    { folderID: 1042, filename: 'bioprinting.txt' },
+    { folderID: null, filename: 'loose.csv' },
+    { folderID: 0, filename: 'alsoloose.csv' }
+  ]);
+  eq(rows.map(function (r) { return r.id; }), [87, 0, 1042], 'busiest folder first; null and 0 are the same root folder');
+  eq(rows[0].count, 4, 'file count per folder');
+  eq(rows[0].names.length, 3, 'at most three example filenames are kept');
+  eq(rows[1].count, 2, 'null folderID is counted as the root (0)');
+  eq(rows[2].names, ['bioprinting.txt'], 'the example filename is what identifies a folder to the user');
+
+  eq(T.groupFilesByFolder([]), [], 'no files -> no folders');
+  eq(T.groupFilesByFolder(null), [], 'a null list is tolerated (failed/empty response)');
+  // `realName` is the field the upload response uses; accept either rather than showing a blank row.
+  eq(T.groupFilesByFolder([{ folderID: 5, realName: 'x.pdf' }])[0].names, ['x.pdf'], 'realName is used when filename is absent');
+  eq(T.groupFilesByFolder([{ folderID: 5 }])[0].names, [], 'a file with no name still counts, without an empty example');
+})();
+
+// ── G. normaliseStoredConfig ────────────────────────────────────────────────────────
+// The configuration endpoint returns the stored JSON as a STRING. Tolerate the other shapes a
+// gateway might return, and never throw: unreadable means "nothing configured", a normal first run.
+section('normaliseStoredConfig: accept the documented string and the plausible variants');
+(function () {
+  eq(T.normaliseStoredConfig('{"pdfFolderID":1042}'), { pdfFolderID: 1042 }, 'the documented JSON string is parsed');
+  eq(T.normaliseStoredConfig({ pdfFolderID: 7 }), { pdfFolderID: 7 }, 'an already-parsed object passes through');
+  eq(T.normaliseStoredConfig({ configuration: '{"pdfFolderID":9}' }), { pdfFolderID: 9 }, 'a {configuration} envelope is unwrapped');
+  eq(T.normaliseStoredConfig(''), {}, 'empty string -> nothing configured');
+  eq(T.normaliseStoredConfig(null), {}, 'null -> nothing configured');
+  eq(T.normaliseStoredConfig('not json'), {}, 'unparseable text -> nothing configured, no throw');
+  eq(T.normaliseStoredConfig('42'), {}, 'a non-object JSON value -> nothing configured');
+})();
+
+// ── H. applyConfig ──────────────────────────────────────────────────────────────────
+// Both routes into the configuration (the platform's Configure dialog and the add-on's own save)
+// land here. 0 is a MEANINGFUL folder value ("the main file area"), so it must not be discarded.
+section('applyConfig: fold a stored configuration onto the live CONFIG block');
+(function () {
+  const before = T.CONFIG.PDF_FOLDER_ID;
+
+  T.CONFIG.PDF_FOLDER_ID = 0;
+  T.applyConfig({ pdfFolderID: 1042 });
+  eq(T.CONFIG.PDF_FOLDER_ID, 1042, 'a folder number is applied');
+
+  T.applyConfig({ pdfFolderID: 0 });
+  eq(T.CONFIG.PDF_FOLDER_ID, 0, 'an explicit 0 resets to the main file area (not treated as unset)');
+
+  T.CONFIG.PDF_FOLDER_ID = 55;
+  T.applyConfig({});
+  eq(T.CONFIG.PDF_FOLDER_ID, 55, 'an absent key leaves the current value alone');
+  T.applyConfig(null);
+  eq(T.CONFIG.PDF_FOLDER_ID, 55, 'a null configuration is a no-op, not a reset');
+  T.applyConfig({ pdfFolderID: '' });
+  eq(T.CONFIG.PDF_FOLDER_ID, 55, 'an empty string is treated as unset');
+  T.applyConfig({ pdfFolderID: 'abc' });
+  eq(T.CONFIG.PDF_FOLDER_ID, 0, 'a non-numeric value falls back to the main file area, never NaN');
+
+  // A string number is what an HTML input yields, and what a hand-edited configuration may hold.
+  T.applyConfig({ pdfFolderID: '77' });
+  eq(T.CONFIG.PDF_FOLDER_ID, 77, 'a numeric string is coerced to a number');
+
+  T.CONFIG.PDF_FOLDER_ID = before;
+})();
+
 console.log('\n' + (failed === 0 ? '✓ ALL PASSED' : '✗ FAILURES') +
   ' — ' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed === 0 ? 0 : 1);

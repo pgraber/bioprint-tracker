@@ -14,10 +14,11 @@ fi
 # 2. Run the test suites. The DOM (wizard) suite needs jsdom (npm install); it is skipped with a
 #    note if node_modules is absent so the zero-dependency suites still gate on their own.
 node addon/test/api-setup.test.js >/dev/null
+node addon/test/config-save.test.js >/dev/null
 node addon/test/placement.test.js >/dev/null
 if [ -d node_modules/jsdom ]; then
   node addon/test/wizard.test.js >/dev/null
-  echo "✓ addon.js in sync with src; api-setup + placement + wizard suites pass"
+  echo "✓ addon.js in sync with src; api-setup + config-save + placement + wizard suites pass"
 else
-  echo "✓ addon.js in sync with src; api-setup + placement pass (wizard skipped — run 'npm install')"
+  echo "✓ addon.js in sync with src; api-setup + config-save + placement pass (wizard skipped — run 'npm install')"
 fi

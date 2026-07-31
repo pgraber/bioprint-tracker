@@ -189,7 +189,16 @@ run `./build.sh`.)
 be **flat, top-level keys** — a standard nested JSON-Schema (`{"properties": {...}}`) is not
 understood; eLabNext renders the schema's own top-level keys (`$schema`, `type`, `properties`, ...) as
 if they were the settings instead of looking inside `properties`. `config.schema.json` is already in
-this flat shape.
+this flat shape, and matches the example in the official add-on configuration documentation.
+
+**If the Configure dialog opens but shows no fields** (observed in a production tenant 2026-07-31, while
+the same add-on rendered the field correctly in the sandbox), the schema is not the cause. Check, in
+order: whether the installed version predates the schema (bump the version, publish, then **upgrade
+the install** — publishing alone does not update an existing install, and an unchanged version number
+gives the platform no reason to consider it stale); and whether the install's **scope** permits the
+current user to edit it (SYSTEM and INSTITUTE are admin-editable only). Since v1.1.0 this no longer
+blocks setup, because the folder can be set from inside the add-on instead. Raise it with eLabNext
+support if neither explains it.
 
 ### 3. Install
 Account Settings → Developer tab (a System Administrator enables this per user) → Side Loading, and
@@ -288,14 +297,28 @@ name) when it becomes a canonical case worth locking in.
   referenced by its **number** (the API has no way to pick a folder by name — a by-name option was
   tried and dropped as unreliable; see `docs/.record/future-ideas.md`). To set it:
   1. In **Data Storage**, create the folder and drop any **marker file** into it (e.g. `bioprinting.txt`).
-  2. In the add-on, click **Set up / check** → **Find file folder number** (or add `#bioprinting-setup`
+  2. In the add-on, click **Set up / check** → **Choose file folder** (or add `#bioprinting-setup`
      to the Inventory URL, or run `BioprintTracker.showFolderIdFinder()` in the console). It lists every
      folder that holds a file, each with its **number** and an **example filename**.
-  3. The row listing your marker file shows the folder **number**. Paste it into the add-on's
-     **Configure** dialog (the folder-number box), or set `CONFIG.PDF_FOLDER_ID` in the code.
-  - The add-on cannot save configuration itself — it is one-way (platform → add-on), so the Configure
-    dialog is where the number persists. The finder is read-only and hidden (not in the everyday menu);
-    reopening it after setting the number shows *"Files are being saved in: folder number …"*.
+  3. Press **Use this folder** on the row listing your marker file. The add-on saves the choice
+     itself, and the row is then marked **✓ in use**.
+  - There is deliberately **no box for typing a folder number**. A typed number cannot be validated
+     (nothing confirms a folder exists or belongs to your group) and placement cannot be corrected
+     afterwards, so a single typo would misdirect every later upload permanently. Every button in the
+     list points at a folder the add-on has just read files out of, so it is known to exist. This is
+     also why step 1 says to drop a marker file in: a folder holding no files cannot be listed.
+  - **Since v1.1.0 the add-on writes this setting itself** (`PUT /api/v1/addons/configuration`),
+    so it no longer depends on the platform's **Configure** dialog. That dialog is still a valid
+    second route and writes the same value; it rendered empty in a production tenant while working in the
+    sandbox (2026-07-31), which is what prompted the change. Setting `CONFIG.PDF_FOLDER_ID` in the
+    code remains a third route, needed only if neither of the above is available.
+  - **Saving can be refused.** A SYSTEM- or INSTITUTE-scoped install is admin-editable only, so a
+    user without that right gets `403` and the dialog says to ask an administrator. Under
+    side-loading there is no installed record and therefore no `sdkPluginID`, so saving is
+    unavailable and the dialog says so while still showing the numbers.
+  - **Placement is write-once.** `folderID` is only accepted at upload and there is no move endpoint
+    (nor create/list/rename for folders), so files uploaded before the folder is set stay in the main
+    file area permanently. Set the folder before real use begins.
 - **Experiment/Study autocomplete.** Built from `sampleMetas` on the plate list returned by
   `GET samples?sampleTypeID=...`. Whether that list endpoint returns full sample metadata or just a
   summary (name/ID) is unconfirmed — if the list endpoint only returns a summary, the field still

@@ -3,7 +3,7 @@
 @name: Bioprint Tracker
 @description: Register RASTRUM and Allegro bioprinter runs in eLabNext: upload a .rastrum as a reusable template, then log each run as barcoded, per-plate records
 @author: Philipp Graber
-@version: 1.0.0
+@version: 1.1.0
 */
 
 /* --- inlined: JSZip 3.10.1 (MIT) --- */
@@ -60,7 +60,11 @@ var BioprintTracker = {};
 
   // ─── Tenant configuration, set these for your eLabNext (SciSure) tenant ─────
   // Shown in the UI (menu title) to confirm which build is loaded and rule out a cached copy.
-  const ADDON_VERSION = '1.0.0';
+  const ADDON_VERSION = '1.1.0';
+
+  // Must match @rootVar in src/header.js. Used to find this add-on's own installed record (and from
+  // it, the sdkPluginID its configuration is stored against), see getInstalledAddon.
+  const ROOT_VAR = 'BioprintTracker';
 
   const CONFIG = {
     // Both left at 0 by default, the add-on finds each type by its exact name ("Bioprint Template" /
@@ -420,7 +424,14 @@ var BioprintTracker = {};
   // eLabSDK.API.Call isn't built for, so this goes through fetch() on the same session instead.
   // Best-effort: callers should treat a rejection here as "attach the file failed", not as a
   // reason to abort the whole save, the record is still valid without the attachment.
+  // Waits for the stored configuration before uploading, so an upload started right after page load
+  // still gets the configured folder. Folder placement is set at upload and cannot be changed later
+  // (there is no move endpoint), so losing this race would strand the file at the storage root.
   function uploadFile(fileName, arrayBuffer) {
+    return configReady.then(() => uploadFileNow(fileName, arrayBuffer));
+  }
+
+  function uploadFileNow(fileName, arrayBuffer) {
     const controller = new AbortController();
     const timeout = setTimeout(() => { controller.abort(); }, API_TIMEOUT_MS);
     const url = `/api/v1/files?fileName=${encodeURIComponent(fileName)}${CONFIG.PDF_FOLDER_ID ? `&folderID=${encodeURIComponent(CONFIG.PDF_FOLDER_ID)}` : ''}`;
@@ -475,6 +486,110 @@ var BioprintTracker = {};
       return resp.json();
     }).then(json => Array.isArray(json) ? json : ((json && (json.data || json.files)) || [])).catch(err => { clearTimeout(timeout); throw err; });
   }
+
+  // ─── The add-on's own stored configuration ────────────────────────────────────
+  // The Developer Platform's Configure dialog is only ONE route into this store. The same values are
+  // readable and writable over the API, and nothing stops the add-on using that route on itself:
+  //   GET  /api/v1/addons/{sdkPluginID}/configuration   read  (returns the stored JSON as a STRING)
+  //   PUT  /api/v1/addons/configuration                 write ({configuration, sdkPluginID, scope})
+  // This matters because the Configure dialog rendered EMPTY in a production tenant while rendering
+  // correctly in the sandbox (2026-07-31), leaving no way to set the file folder. Writing the value
+  // from inside the add-on removes that dependency: setup finishes in the folder finder itself.
+  // It is not a way around permissions. Both routes write the same value under the same rules, so a
+  // user who may not edit the install's configuration gets a 403 here too, just with a clear message.
+  const CONFIG_SCOPES = ['USER', 'GROUP', 'INSTITUTE', 'SYSTEM'];
+
+  // This add-on's installed record, which is the only source of the sdkPluginID its configuration is
+  // keyed by. Cached on success only: a failure (e.g. side-loaded, so there is no installed record)
+  // must stay retryable rather than poisoning every later call.
+  let installedAddonPromise = null;
+  function getInstalledAddon() {
+    if (installedAddonPromise) return installedAddonPromise;
+    const p = apiCall('GET', 'addons/installed', null, { rootVar: ROOT_VAR, '$records': 100 })
+      .then(resp => {
+        const list = (resp && Array.isArray(resp.data)) ? resp.data : (Array.isArray(resp) ? resp : []);
+        const mine = list.filter(a => a && String(a.rootVar || '').trim() === ROOT_VAR);
+        if (!mine.length) {
+          throw new Error(
+            'This add-on does not appear as installed in this environment, so its settings cannot be ' +
+            'saved from here. That is expected while side-loading. Note the folder number and set it ' +
+            'in the add-on’s Configure screen instead.');
+        }
+        // An add-on can be installed at more than one scope; prefer an active record over an inactive
+        // one, otherwise keep the order the API returned.
+        const active = mine.filter(a => a.active !== false);
+        return (active.length ? active : mine)[0];
+      });
+    p.catch(() => { installedAddonPromise = null; });
+    installedAddonPromise = p;
+    return p;
+  }
+
+  // The stored configuration comes back as a JSON STRING, per the reference. Tolerate the shapes a
+  // gateway might hand back instead (an already-parsed object, or one wrapped in a {configuration}
+  // envelope) rather than assuming one and failing opaquely. Anything unreadable means "nothing
+  // configured", never a thrown error, since a missing configuration is a normal first-run state.
+  function normaliseStoredConfig(raw) {
+    if (raw == null || raw === '') return {};
+    if (typeof raw === 'object') {
+      if (raw.configuration != null) return normaliseStoredConfig(raw.configuration);
+      return raw;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function readStoredConfig() {
+    return getInstalledAddon().then(a =>
+      apiCall('GET', `addons/${encodeURIComponent(a.sdkPluginID)}/configuration`)
+        .then(normaliseStoredConfig));
+  }
+
+  // Merge `patch` into whatever is already stored and write the whole object back. The endpoint
+  // replaces the configuration wholesale, so writing only the changed key would silently discard
+  // every other setting. A read that fails is treated as "nothing stored yet" so a first write can
+  // still succeed; a read that succeeds is preserved in full.
+  function saveStoredConfig(patch) {
+    return getInstalledAddon().then(a => {
+      const declared = String(a.scope || '').toUpperCase();
+      // Write at the scope the add-on is installed at, so the value is read back by the same
+      // resolution that served it. Fall back to GROUP (this add-on's sample types are per-group, so
+      // that is the level its settings belong to) if the record carries no usable scope.
+      const scope = CONFIG_SCOPES.indexOf(declared) !== -1 ? declared : 'GROUP';
+      return apiCall('GET', `addons/${encodeURIComponent(a.sdkPluginID)}/configuration`)
+        .then(normaliseStoredConfig, () => ({}))
+        .then(current => {
+          const merged = Object.assign({}, current, patch);
+          return apiCall('PUT', 'addons/configuration', {
+            configuration: JSON.stringify(merged),
+            sdkPluginID: a.sdkPluginID,
+            scope
+          }).then(() => merged);
+        });
+    });
+  }
+
+  // Apply a configuration object (from either route) onto the live CONFIG block.
+  function applyConfig(cfg) {
+    if (!cfg || typeof cfg !== 'object') return;
+    if (cfg.sampleTypeProtocol) CONFIG.SAMPLE_TYPE_PROTOCOL = cfg.sampleTypeProtocol;
+    if (cfg.sampleTypePlate) CONFIG.SAMPLE_TYPE_PLATE = cfg.sampleTypePlate;
+    // Explicit 0 / '' is meaningful here: it means "the main file area", so only an absent value is
+    // ignored. A non-numeric value is treated as unset rather than silently becoming NaN.
+    if (cfg.pdfFolderID != null && cfg.pdfFolderID !== '') {
+      CONFIG.PDF_FOLDER_ID = Number(cfg.pdfFolderID) || 0;
+    }
+  }
+
+  // Resolves once the stored configuration has been applied (or has failed, which is not fatal).
+  // uploadFile waits on it so a file uploaded moments after page load still lands in the configured
+  // folder rather than at the storage root. Placement cannot be corrected afterwards: the API has no
+  // move endpoint and folderID is only accepted at upload, so a race here is a permanent mistake.
+  let configReady = Promise.resolve();
 
   // ─── .rastrum parser, runs entirely in the browser (JSZip + js-yaml are inlined) ─
   function sha256Hex(buf) {
@@ -1347,6 +1462,12 @@ var BioprintTracker = {};
       '.bpt-wiz-dot{width:8px;height:8px;border-radius:50%;background:#d8dce1;}' +
       '.bpt-wiz-dot.active{background:#4f46e5;}' +
       '.bpt-wiz-dot.done{background:#16a34a;}' +   // approved plate
+      // Dots jump to a plate, so they are click targets. The visible dot stays 8px while padding
+      // (clipped out of the background) grows the hit area to 24px, the WCAG 2.2 minimum.
+      '.bpt-wiz-dot{cursor:pointer;padding:8px;background-clip:content-box;}' +
+      '.bpt-wiz-dots{gap:0;}' +
+      '.bpt-wiz-dot:hover,.bpt-wiz-dot:focus{outline:2px solid #c7d2fe;outline-offset:-4px;}' +
+      '.bpt-wiz-approve-row{display:flex;justify-content:center;margin-top:10px;}' +
       '.bpt-wiz-approve{border-color:#4f46e5;color:#4338ca;}' +
       '.bpt-wiz-approve.done{background:#dcfce7;border-color:#16a34a;color:#15803d;}' +
       '.bpt-wiz-status{font-size:12px;color:#475569;margin-top:8px;text-align:center;}' +
@@ -1463,10 +1584,15 @@ var BioprintTracker = {};
   // Schema / Default Configuration for this add-on (see config.schema.json / config.default.json
   // in this folder). It lets the two sample-type IDs be set per-tenant without editing this file.
   addon.init = configuration => {
-    if (configuration) {
-      if (configuration.sampleTypeProtocol) CONFIG.SAMPLE_TYPE_PROTOCOL = configuration.sampleTypeProtocol;
-      if (configuration.sampleTypePlate) CONFIG.SAMPLE_TYPE_PLATE = configuration.sampleTypePlate;
-      if (configuration.pdfFolderID) CONFIG.PDF_FOLDER_ID = configuration.pdfFolderID;
+    applyConfig(configuration);
+    // The platform does not always hand the configuration to init: it passes nothing when the add-on
+    // is side-loaded, and an install whose published version predates the configuration schema has
+    // no schema to render or deliver (the empty Configure dialog seen in a production tenant, 2026-07-31).
+    // In those cases read the stored value over the API instead, which does not depend on the schema
+    // or on the dialog. Skipped when init already supplied a folder, so the platform stays
+    // authoritative where it speaks. Never fatal: an unreadable configuration just leaves defaults.
+    if (!configuration || configuration.pdfFolderID == null || configuration.pdfFolderID === '') {
+      configReady = readStoredConfig().then(applyConfig, () => {});
     }
     // Placement. A top-nav "Bioprint Tracker" tab via eLabSDK.CustomPage was
     // tried and removed: it rendered an empty page on the tenant because CustomPage's content
@@ -1620,57 +1746,160 @@ var BioprintTracker = {};
             'their fields. Needs an administrator account.</li>' +
           '<li><b>Check sample types</b> — confirms those types and their fields are complete. Only ' +
             'looks; changes nothing.</li>' +
-          '<li><b>Find file folder number</b> — looks up the number of a Data Storage folder, to paste ' +
-            'into the Configure screen.</li>' +
+          '<li><b>Choose file folder</b> — picks the Data Storage folder that uploaded files go into, ' +
+            'and saves the choice.</li>' +
         '</ul>',
       customButtons: [
         { label: 'Set up sample types', fn() { closeModal(); addon.setupSampleTypes(); } },
         { label: 'Check sample types', fn() { closeModal(); addon.checkSampleTypes(); } },
-        { label: 'Find file folder number', fn() { closeModal(); addon.showFolderIdFinder(); } }
+        { label: 'Choose file folder', fn() { closeModal(); addon.showFolderIdFinder(); } }
       ]
     });
   };
 
-  // Setup helper (hidden; #bioprinting-setup or console): shows which Data Storage folders hold files,
-  // with their IDs, so the user can copy the right one into the Configure dialog (pdfFolderID).
-  // Read-only, the add-on cannot persist config itself (configuration is one-way, platform -> add-on).
-  // There is no list-folders / folder-NAME endpoint (confirmed in the docs), so folders are
-  // reconstructed from the files' own `folderID`, and each folder is identified by an EXAMPLE FILENAME
-  // it contains (`filename` IS returned), since names aren't available, recognising a file you put in
-  // the folder is how you tell folders apart. A folder appears once it holds at least one file.
+  // Collapse a file list into one entry per Data Storage folder. There is no list-folders and no
+  // folder-by-NAME endpoint (confirmed by eLabNext dev support 2026-07-24), so the only way to
+  // surface a folder is to read the `folderID` off files that already sit in it. Folders are
+  // therefore identified by an EXAMPLE FILENAME they contain: recognising a file you put there is how
+  // you tell one folder from another. A folder with no files in it cannot appear at all, which is why
+  // the dialog also offers manual entry. Busiest folder first. Pure, so it is unit-tested.
+  function groupFilesByFolder(files) {
+    const byFolder = {}, order = [];
+    (files || []).forEach(f => {
+      const id = (!f || f.folderID == null || f.folderID === 0) ? 0 : f.folderID;
+      if (!byFolder[id]) { byFolder[id] = { id, count: 0, names: [] }; order.push(id); }
+      byFolder[id].count++;
+      const name = f && (f.filename || f.realName);
+      if (byFolder[id].names.length < 3 && name) byFolder[id].names.push(name);
+    });
+    return order.map(id => byFolder[id]).sort((a, b) => b.count - a.count);
+  }
+
+  // Setup helper (hidden; #bioprinting-setup or console): lists the Data Storage folders that hold
+  // files, with their numbers, and SAVES the chosen one as this add-on's configuration.
+  //
+  // It saves the value itself rather than sending the user to the platform's Configure dialog. That
+  // dialog rendered empty in a production tenant while working in the sandbox (2026-07-31), which left the
+  // folder unsettable; writing through the API does not depend on the configuration schema being
+  // delivered to the install. See saveStoredConfig. Saving is refused by the server (403) for a user
+  // who may not edit the install's configuration, and is unavailable when side-loading (no installed
+  // record, so no sdkPluginID); both are reported in the dialog rather than failing quietly.
   addon.showFolderIdFinder = () => {
-    const current = CONFIG.PDF_FOLDER_ID || 0;
+    let current = CONFIG.PDF_FOLDER_ID || 0;
+    const describe = id => (id ? `folder number ${esc(id)}` : 'the main file area (no folder chosen)');
     showDialog({
-      width: 600, title: 'Find your file folder number',
+      width: 640, title: 'Choose your file folder',
       btnCancelLabel: 'Back', onCancel() { addon.showSetupHub(); },
       content:
-        `<p class="bpt-hint" style="margin:0 0 10px;">Files are being saved in: <b>${current ? `folder number ${esc(current)}` : 'the main file area (no folder chosen)'}</b>.</p><p class="bpt-hint" style="margin:0 0 12px;">To keep uploaded files in one folder, you need that folder’s <b>number</b>. eLabNext doesn’t show folder numbers directly, so:</p><ol class="bpt-hint" style="margin:0 0 12px 18px;padding:0;"><li>In <b>Data Storage</b>, open the folder you want to use and put any file in it (for example a file called <code>bioprinting.txt</code>).</li><li>Find that file in the list below and copy the <b>Folder number</b> next to it.</li><li>Paste it into this add-on’s <b>Configure</b> screen, in the folder-number box.</li></ol><div id="bpt-folder-list"><p class="bpt-hint">Loading folders…</p></div>`,
+        `<p class="bpt-hint" style="margin:0 0 10px;">Files are being saved in: <b id="bpt-folder-current">${describe(current)}</b>.</p>` +
+        '<p class="bpt-hint" style="margin:0 0 12px;">Keeping uploaded files in one folder needs that ' +
+        'folder’s <b>number</b>. eLabNext doesn’t show folder numbers directly, so:</p>' +
+        '<ol class="bpt-hint" style="margin:0 0 12px 18px;padding:0;">' +
+          '<li>In <b>Data Storage</b>, open the folder you want to use and put any file in it (for ' +
+            'example a file called <code>bioprinting.txt</code>).</li>' +
+          '<li>Find that file in the list below and press <b>Use this folder</b> next to it.</li>' +
+        '</ol>' +
+        '<div id="bpt-folder-list"><p class="bpt-hint">Loading folders…</p></div>' +
+        '<div id="bpt-folder-status" style="margin:10px 0 0;"></div>',
+      // There is deliberately no "type a folder number" box. A typed number cannot be checked: there
+      // is no endpoint to confirm a folder exists or belongs to this group, and placement is accepted
+      // only at upload with no way to move a file afterwards, so one typo would send every later
+      // upload somewhere unrecoverable. Every button below points at a folder we have just read files
+      // out of, so it is known to exist. A folder holding no files cannot be listed at all, which is
+      // why the instructions above say to drop a marker file into it first.
       afterRender() {
         const box = document.getElementById('bpt-folder-list');
-        listFiles().then(files => {
-          const byFolder = {};
-          (files || []).forEach(f => {
-            const id = (f.folderID == null || f.folderID === 0) ? 0 : f.folderID;
-            if (!byFolder[id]) byFolder[id] = { id, count: 0, names: [] };
-            byFolder[id].count++;
-            if (byFolder[id].names.length < 3 && f.filename) byFolder[id].names.push(f.filename);
-          });
-          const rows = Object.keys(byFolder).map(k => byFolder[k])
-            .sort((a, b) => b.count - a.count);
+        const statusBox = document.getElementById('bpt-folder-status');
+        let rows = [], installedRecord = null;
+
+        function status(html, kind) {
+          if (!statusBox) return;
+          const colour = kind === 'error' ? '#b91c1c' : (kind === 'ok' ? '#15803d' : '#64748b');
+          statusBox.innerHTML = `<p class="bpt-hint" style="margin:0;color:${colour};font-weight:600;">${html}</p>`;
+        }
+        function setButtonsDisabled(disabled) {
+          const btns = document.querySelectorAll('[data-bpt-folder]');
+          Array.prototype.forEach.call(btns, b => { b.disabled = disabled; });
+        }
+
+        // Redrawn after every save, not only on open: the chosen row has to carry the "in use" mark
+        // and lose its button, and the previously chosen row has to give both up. Updating only the
+        // line at the top would leave the table contradicting it until the dialog was reopened.
+        function renderTable() {
           if (!rows.length) {
-            box.innerHTML = '<p class="bpt-error">No files found yet, so there are no folders to show. ' +
+            box.innerHTML = '<p class="bpt-hint">No files found yet, so there are no folders to show. ' +
               'Put a file into the folder you want to use in Data Storage, then open this again.</p>';
             return;
           }
-          box.innerHTML = `<table class="bpt-table"><tr><th>Folder number</th><th>Example file(s) in it</th><th>Files</th></tr>${rows.map(r => {
-  const label = r.id === 0 ? '<i>main file area</i>' : esc(r.id);
-  const isCur = String(r.id) === String(current) || (r.id === 0 && !current);
-  const eg = r.names.length ? esc(r.names.join(', ')) +
-    (r.count > r.names.length ? ', …' : '') : '—';
-  return `<tr${isCur ? ' style="background:#eef6ff;"' : ''}><td><b>${label}</b>${isCur ? ' ← current' : ''}</td><td style="word-break:break-all;">${eg}</td><td>${esc(r.count)}</td></tr>`;
-}).join('')}</table>`;
-        }).catch(err => {
-          box.innerHTML = `<p class="bpt-error">Could not list files: ${esc(err.message)}</p>`;
+          box.innerHTML = `<table class="bpt-table"><tr><th>Folder number</th><th>Example file(s) in it</th><th>Files</th><th></th></tr>${rows.map(r => {
+            const label = r.id === 0 ? '<i>main file area</i>' : esc(r.id);
+            const isCur = String(r.id) === String(current) || (r.id === 0 && !current);
+            const eg = r.names.length
+              ? esc(r.names.join(', ')) + (r.count > r.names.length ? ', …' : '')
+              : '—';
+            // The "in use" mark lives with the folder name, not in the button column, so it is still
+            // shown when saving is unavailable (side-loading) and that column is empty.
+            const mark = isCur ? ' <b style="color:#15803d;white-space:nowrap;">✓ in use</b>' : '';
+            const action = (!installedRecord || isCur) ? ''
+              : `<button type="button" class="bpt-btn bpt-btn-secondary" style="margin:0;padding:5px 10px;white-space:nowrap;" data-bpt-folder="${esc(r.id)}">Use this folder</button>`;
+            // The chosen row is marked three ways (tint, left rule, and the tick) rather than by
+            // colour alone, which would be invisible to a colourblind reader and easy to miss.
+            const rowStyle = isCur
+              ? ' style="background:#eef6ff;box-shadow:inset 3px 0 0 #4f46e5;"'
+              : '';
+            return `<tr${rowStyle}><td><b>${label}</b>${mark}</td><td style="word-break:break-all;">${eg}</td><td>${esc(r.count)}</td><td>${action}</td></tr>`;
+          }).join('')}</table>`;
+          const btns = document.querySelectorAll('[data-bpt-folder]');
+          Array.prototype.forEach.call(btns, b => {
+            b.onclick = () => { save(parseInt(b.getAttribute('data-bpt-folder'), 10) || 0); };
+          });
+        }
+
+        // Saving replaces the whole stored configuration, so failures must be visible, never assumed.
+        function save(id) {
+          setButtonsDisabled(true);
+          status('Saving…');
+          saveStoredConfig({ pdfFolderID: id }).then(() => {
+            CONFIG.PDF_FOLDER_ID = id;
+            current = id;
+            const line = document.getElementById('bpt-folder-current');
+            if (line) line.innerHTML = describe(id);
+            renderTable();
+            status(`Saved. New uploads will go to <b>${describe(id)}</b>. Files already uploaded stay ` +
+              'where they are: eLabNext has no way to move a file between folders.', 'ok');
+          }).catch(err => {
+            setButtonsDisabled(false);
+            const msg = (err && err.message) || String(err);
+            if (/\(403\)|forbidden/i.test(msg)) {
+              status('Not saved: your account is not allowed to change this add-on’s settings. Ask an ' +
+                'eLabNext administrator to choose the folder, or to install the add-on for your group.',
+                'error');
+            } else {
+              status(`Not saved: ${esc(msg)}`, 'error');
+            }
+          });
+        }
+
+        // The installed record is fetched alongside the file list because its sdkPluginID is what the
+        // configuration is stored against. Without it the numbers are still worth showing, so a
+        // failure disables saving rather than emptying the dialog.
+        Promise.all([
+          listFiles().then(f => ({ files: f }), err => ({ error: err })),
+          getInstalledAddon().then(a => a, () => null)
+        ]).then(res => {
+          const filesResult = res[0];
+          installedRecord = res[1];
+          if (filesResult.error) {
+            box.innerHTML = `<p class="bpt-error">Could not list files: ${esc(filesResult.error.message)}</p>`;
+          } else {
+            rows = groupFilesByFolder(filesResult.files);
+            renderTable();
+          }
+          if (!installedRecord) {
+            status('This add-on is not installed in this environment (side-loading does this), so the ' +
+              'choice cannot be saved from here. Note the number and set it in the add-on’s Configure ' +
+              'screen instead.', 'error');
+          }
         });
       }
     });
@@ -1824,6 +2053,10 @@ var BioprintTracker = {};
   addon.showProtocolForm = (prefill, protocolTypeID) => {
     showDialog({
       width: 520, title: 'Upload a print protocol',
+      // "Back" rather than "Close": this dialog is reached from the launcher menu, so the way out of
+      // a wrong choice is the menu, not the whole add-on. Anything typed here is discarded, the same
+      // as before, since nothing has been saved yet at this point.
+      btnCancelLabel: 'Back', onCancel() { addon.showMainDialog(); },
       content:
         // Printer version (RASTRUM vs Allegro) is NOT asked here, it is detected from the file on
         // parse and shown in the next step. The physical printer (the named machine) is chosen
@@ -2306,13 +2539,26 @@ var BioprintTracker = {};
       plate: '', label: '', cell_line: run.cell_line || '',
       concentration: run.cell_concentration || '', matrix_codes: '', wellplate: ''
     }];
-    return plates.map(p => {
+    return plates.map((p, i) => {
       const cellLine = p.cell_line || run.cell_line || '';
       const conc = p.concentration || run.cell_concentration || '';
       const plateId = p.plate || p.label || '';
+      // Plate suffix = an ORDINAL in the file's plate order (P1, P2), the same in both formats.
+      // It used to be a pass-through of each format's own plate key, which meant different things in
+      // each: Allegro supplies a plate ordinal (W1, W2) but classic RASTRUM supplies the wellplate
+      // consumable config code (WP001, WP031), so the same position in the name said "which plate" in
+      // one format and "which plate type" in the other. WP031 also tells a reader nothing and does not
+      // sort by plate order (confirmed in the tenant 2026-07-30: the list put WP031 above WP001). The
+      // consumable code is not lost, it has its own `Wellplate` field. Taken from the label ("Plate 2")
+      // so it stays the file's ordinal when only some plates are logged, falling back to position.
+      const labelOrdinal = String(p.label || '').match(/(\d+)/);
+      const ordinal = labelOrdinal ? parseInt(labelOrdinal[1], 10) : (i + 1);
+      // Only a plate with an identity of its own is numbered. A run synthesized without plates (the
+      // fallback above, and older callers) has none, and stays suffix-free rather than gaining "_P1".
+      const plateTag = plateId ? `P${ordinal}` : '';
       // Name = intrinsic, stable facts only (no derived rep number): date_cellline_protocol_fp_plate.
       // The barcode is the true unique key; the name is for human recognition in sample lists.
-      const name = [run.date, slugify(cellLine), base, fingerprint, slugify(plateId)]
+      const name = [run.date, slugify(cellLine), base, fingerprint, plateTag]
         .filter(Boolean).join('_');
       const metas = [
         metaLink('Bioprint Template', parseInt(run.protocol_id, 10)),
@@ -2413,6 +2659,7 @@ var BioprintTracker = {};
       // Broad so a 384-well plate map and the two-column fields sit comfortably (capped at 90vw by
       // the modal, so it still fits smaller screens).
       width: 860, title: 'Log a print run',
+      btnCancelLabel: 'Back', onCancel() { addon.showMainDialog(); },
       content:
         // Collapsed by default (no `open`) so it stays out of the way; click to expand. Pulled up
         // (negative margin on the wrapper, AND margin-top:0 on the <details> itself, the shared
@@ -2660,7 +2907,10 @@ var BioprintTracker = {};
           wiz.step = i;
           const v = plateVals(plate);
           const locked = [shortWellplate(plate.wellplate), plate.matrix_codes].filter(Boolean).join(' · ');
-          const dots = plates.map((p, j) => `<span class="bpt-wiz-dot${j === i ? ' active' : ''}${wiz.approved[plateKey(p)] ? ' done' : ''}"></span>`).join('');
+          // Dots double as a jump target: with more than two or three plates, stepping through with
+          // Back/Next to reach one plate is tedious. title= names the plate for a screen reader and
+          // on hover, since a dot alone says nothing.
+          const dots = plates.map((p, j) => `<span class="bpt-wiz-dot${j === i ? ' active' : ''}${wiz.approved[plateKey(p)] ? ' done' : ''}" data-bpt-step="${j}" role="button" tabindex="0" title="Plate ${j + 1}${wiz.approved[plateKey(p)] ? ' (approved)' : ''}"></span>`).join('');
           document.getElementById('bpt-plate-area').innerHTML =
             // type="text" + inputmode=numeric instead of type="number": the eLabNext host
             // stylesheet forces input[type=number] to a fixed narrow width (even over an inline
@@ -2669,7 +2919,7 @@ var BioprintTracker = {};
             // Passage is optional and NOT in the print file (the printer doesn't know it), entered
             // here per plate. Like cell line / concentration it can be multi-valued: one per cell
             // line, comma-separated in the SAME order, so "Cell A, Cell B" at p12/p8 -> "12, 8".
-            `<div class="bpt-wiz-head"><span class="bpt-wiz-title">Plate ${i + 1} of ${plates.length}${plate.plate ? ` · ${esc(plate.plate)}` : ''}</span>${locked ? `<span class="bpt-wiz-sub">${esc(locked)}</span>` : ''}</div><div class="bpt-wiz-map" id="bpt-wiz-map"></div><div class="bpt-plate-form"><div class="bpt-field"><label>Cell line *</label><input class="bpt-inp bpt-pl-cellline" type="text" list="bpt-cellline-list" placeholder="e.g. MDA-MB-231" value="${esc(v.cell_line)}"></div><div class="bpt-field"><label>Concentration (cells/mL) *</label><input class="bpt-inp bpt-pl-conc" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 9400000" value="${esc(v.concentration)}"></div><div class="bpt-field bpt-sf-2"><label>Passage number</label><input class="bpt-inp bpt-pl-passage" type="text" placeholder="e.g. 12  (or 12, 8, 20 — one per cell line, same order)" value="${esc(v.passage)}"></div></div><div class="bpt-dym bpt-pl-dym" style="display:none;"></div><div class="bpt-field" style="margin-top:10px;"><label>Plate note</label><textarea class="bpt-inp bpt-pl-note" rows="2" placeholder="anything specific to THIS plate, e.g. nozzle 3 clogged">${esc(v.note)}</textarea></div><div class="bpt-wiz-nav"><button type="button" class="bpt-wiz-btn" id="bpt-wiz-prev"${i === 0 ? ' disabled' : ''}>‹ Back</button><div class="bpt-wiz-dots">${dots}</div><button type="button" class="bpt-wiz-btn bpt-wiz-approve${wiz.approved[key] ? ' done' : ''}" id="bpt-wiz-approve">${wiz.approved[key] ? '✓ Approved' : 'Approve plate'}</button></div><div class="bpt-wiz-status" id="bpt-wiz-status"></div>`;
+            `<div class="bpt-wiz-head"><span class="bpt-wiz-title">Plate ${i + 1} of ${plates.length}${plate.plate ? ` · ${esc(plate.plate)}` : ''}</span>${locked ? `<span class="bpt-wiz-sub">${esc(locked)}</span>` : ''}</div><div class="bpt-wiz-map" id="bpt-wiz-map"></div><div class="bpt-plate-form"><div class="bpt-field"><label>Cell line *</label><input class="bpt-inp bpt-pl-cellline" type="text" list="bpt-cellline-list" placeholder="e.g. MDA-MB-231" value="${esc(v.cell_line)}"></div><div class="bpt-field"><label>Concentration (cells/mL) *</label><input class="bpt-inp bpt-pl-conc" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 9400000" value="${esc(v.concentration)}"></div><div class="bpt-field bpt-sf-2"><label>Passage number</label><input class="bpt-inp bpt-pl-passage" type="text" placeholder="e.g. 12  (or 12, 8, 20 — one per cell line, same order)" value="${esc(v.passage)}"></div></div><div class="bpt-dym bpt-pl-dym" style="display:none;"></div><div class="bpt-field" style="margin-top:10px;"><label>Plate note</label><textarea class="bpt-inp bpt-pl-note" rows="2" placeholder="anything specific to THIS plate, e.g. nozzle 3 clogged">${esc(v.note)}</textarea></div><div class="bpt-wiz-nav"><button type="button" class="bpt-wiz-btn" id="bpt-wiz-prev"${i === 0 ? ' disabled' : ''}>‹ Back</button><div class="bpt-wiz-dots">${dots}</div><button type="button" class="bpt-wiz-btn" id="bpt-wiz-next"${i === plates.length - 1 ? ' disabled' : ''}>Next ›</button></div><div class="bpt-wiz-approve-row"><button type="button" class="bpt-wiz-btn bpt-wiz-approve${wiz.approved[key] ? ' done' : ''}" id="bpt-wiz-approve">${wiz.approved[key] ? '✓ Approved — click to undo' : 'Approve plate'}</button></div><div class="bpt-wiz-status" id="bpt-wiz-status"></div>`;
           renderPlateMapInto(rehydrate(plate.rows), document.getElementById('bpt-wiz-map'));
           attachDidYouMean(document.querySelector('#bpt-plate-area .bpt-pl-cellline'),
             cellLineValues, document.querySelector('#bpt-plate-area .bpt-pl-dym'));
@@ -2689,13 +2939,28 @@ var BioprintTracker = {};
           const ccEl = document.querySelector('#bpt-plate-area .bpt-pl-conc');
           if (clEl) clEl.addEventListener('input', unApproveOnEdit);
           if (ccEl) ccEl.addEventListener('input', unApproveOnEdit);
-          document.getElementById('bpt-wiz-prev').onclick = () => {
-            if (wiz.step > 0) { saveCurrentStep(); renderStep(wiz.step - 1); }
-          };
-          // Toggle: an already-approved plate un-approves on click instead of re-validating and
-          // advancing, so changing your mind (wanting to review or edit before really committing)
-          // doesn't require touching cell line/concentration first just to trigger unApproveOnEdit.
-          // Stays on the same step either way, approving is the only action that advances.
+          // Moving between plates and approving a plate are SEPARATE actions. Approving used to be
+          // the only thing that advanced, while an approved plate's button un-approved instead of
+          // advancing, so returning to an earlier plate left no way forward except withdrawing and
+          // re-granting approval. Navigation now never changes approval, and approving never
+          // navigates. Every move saves the current fields first, so nothing typed is lost.
+          function goTo(j) {
+            if (j < 0 || j >= plates.length || j === wiz.step) return;
+            saveCurrentStep();
+            renderStep(j);
+          }
+          document.getElementById('bpt-wiz-prev').onclick = () => { goTo(wiz.step - 1); };
+          document.getElementById('bpt-wiz-next').onclick = () => { goTo(wiz.step + 1); };
+          const dotEls = document.querySelectorAll('#bpt-plate-area .bpt-wiz-dot');
+          Array.prototype.forEach.call(dotEls, d => {
+            const j = parseInt(d.getAttribute('data-bpt-step'), 10);
+            d.onclick = () => { goTo(j); };
+            d.onkeydown = ev => {
+              if (ev && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); goTo(j); }
+            };
+          });
+          // Approving stays on the current plate. An already-approved plate un-approves on click, so
+          // withdrawing approval is deliberate rather than a side effect of trying to move.
           document.getElementById('bpt-wiz-approve').onclick = () => {
             if (wiz.approved[key]) { wiz.approved[key] = false; renderStep(wiz.step); return; }
             saveCurrentStep();
@@ -2704,7 +2969,7 @@ var BioprintTracker = {};
             const problem = plateFieldProblem(e);
             if (problem) { if (st) st.textContent = problem; return; }
             wiz.approved[key] = true;
-            renderStep(wiz.step < plates.length - 1 ? wiz.step + 1 : wiz.step);
+            renderStep(wiz.step);
           };
           updateStatus();
         }
@@ -2948,6 +3213,14 @@ var BioprintTracker = {};
       parseRastrum,
       getSampleById,
       stampMetaIDs,
+      groupFilesByFolder,
+      getInstalledAddon,
+      readStoredConfig,
+      saveStoredConfig,
+      resetInstalledAddonCache() { installedAddonPromise = null; },
+      normaliseStoredConfig,
+      applyConfig,
+      CONFIG,
       checkTypeFields,
       prettyType,
       REQUIRED_SAMPLE_TYPE_FIELDS
