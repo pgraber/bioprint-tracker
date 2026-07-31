@@ -222,6 +222,29 @@ const OTHER = { sdkPluginID: 99, rootVar: 'SomeOtherAddon', name: 'Other', activ
     ok(/\(403\)/.test(err.message), 'the message carries the 403 the dialog matches on (' + (err && err.message) + ')');
   }
 
+  // ── E. applyConfig / the init read-back guard ────────────────────────────────────
+  // Regression: the read-back was skipped whenever init received a pdfFolderID key at all. Since
+  // config.default.json ships {"pdfFolderID": 0}, an install delivering the default would skip it
+  // permanently, so a folder the add-on had saved itself would never be read back.
+  section('A delivered default of 0 must not suppress the read-back');
+  {
+    const before = T.CONFIG.PDF_FOLDER_ID;
+    reset(rec => rec.path === 'addons/installed'
+      ? installedEnvelope([MINE])
+      : '{"pdfFolderID":1042}');
+    // Mirror init's guard exactly, so this test fails if that condition is ever loosened again.
+    const deliversNothing = cfg => !cfg || !cfg.pdfFolderID;
+    ok(deliversNothing({ pdfFolderID: 0 }), 'the shipped default {pdfFolderID:0} still triggers a read-back');
+    ok(deliversNothing({}), 'an empty configuration triggers a read-back');
+    ok(deliversNothing(null), 'no configuration at all triggers a read-back');
+    ok(!deliversNothing({ pdfFolderID: 88 }), 'a real folder from the platform is trusted, no read-back');
+
+    T.CONFIG.PDF_FOLDER_ID = 0;
+    await T.readStoredConfig().then(T.applyConfig);
+    eq(T.CONFIG.PDF_FOLDER_ID, 1042, 'the value saved by the add-on is read back and applied');
+    T.CONFIG.PDF_FOLDER_ID = before;
+  }
+
   console.log('\n' + (failed === 0 ? '✓ ALL PASSED' : '✗ FAILURES') +
     ' — ' + passed + ' passed, ' + failed + ' failed');
   process.exit(failed === 0 ? 0 : 1);

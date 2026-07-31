@@ -578,8 +578,9 @@ var BioprintTracker = {};
     if (!cfg || typeof cfg !== 'object') return;
     if (cfg.sampleTypeProtocol) CONFIG.SAMPLE_TYPE_PROTOCOL = cfg.sampleTypeProtocol;
     if (cfg.sampleTypePlate) CONFIG.SAMPLE_TYPE_PLATE = cfg.sampleTypePlate;
-    // Explicit 0 / '' is meaningful here: it means "the main file area", so only an absent value is
-    // ignored. A non-numeric value is treated as unset rather than silently becoming NaN.
+    // An explicit 0 IS meaningful, it selects the main file area, so it must not be discarded as
+    // merely falsy. An absent key or an empty string (a cleared input) means unset and is ignored. A
+    // non-numeric value falls back to the main file area rather than silently becoming NaN.
     if (cfg.pdfFolderID != null && cfg.pdfFolderID !== '') {
       CONFIG.PDF_FOLDER_ID = Number(cfg.pdfFolderID) || 0;
     }
@@ -1642,7 +1643,11 @@ var BioprintTracker = {};
     // In those cases read the stored value over the API instead, which does not depend on the schema
     // or on the dialog. Skipped when init already supplied a folder, so the platform stays
     // authoritative where it speaks. Never fatal: an unreadable configuration just leaves defaults.
-    if (!configuration || configuration.pdfFolderID == null || configuration.pdfFolderID === '') {
+    // Tested for a USABLE folder, not merely a present key: config.default.json ships
+    // {"pdfFolderID": 0}, so an install that delivers the default hands init a value that is neither
+    // null nor '', which would skip the read-back entirely and permanently hide a folder the add-on
+    // had saved itself. 0 means "the main file area", so reading back to confirm it costs nothing.
+    if (!configuration || !configuration.pdfFolderID) {
       configReady = readStoredConfig().then(applyConfig, () => {});
     }
     // Placement. A top-nav "Bioprint Tracker" tab via eLabSDK.CustomPage was
@@ -1808,12 +1813,6 @@ var BioprintTracker = {};
     });
   };
 
-  // Collapse a file list into one entry per Data Storage folder. There is no list-folders and no
-  // folder-by-NAME endpoint (confirmed by eLabNext dev support 2026-07-24), so the only way to
-  // surface a folder is to read the `folderID` off files that already sit in it. Folders are
-  // therefore identified by an EXAMPLE FILENAME they contain: recognising a file you put there is how
-  // you tell one folder from another. A folder with no files in it cannot appear at all, which is why
-  // the dialog also offers manual entry. Busiest folder first. Pure, so it is unit-tested.
   // Shorten a filename from the MIDDLE, so both the start and the distinguishing tail survive
   // ("2026-07-22_Allegro_newconfig_4f8b7f_wellplate.csv" -> "2026-07-22_Alle…_wellplate.csv"). Cutting
   // the end instead would leave a column of names that all begin identically and cannot be told apart.
@@ -1825,6 +1824,12 @@ var BioprintTracker = {};
     return `${s.slice(0, keepStart)}…${s.slice(s.length - keepEnd)}`;
   }
 
+  // Collapse a file list into one entry per Data Storage folder. There is no list-folders and no
+  // folder-by-NAME endpoint (confirmed by eLabNext dev support 2026-07-24), so the only way to
+  // surface a folder is to read the `folderID` off files that already sit in it. Folders are
+  // therefore identified by an EXAMPLE FILENAME they contain: recognising a file you put there is how
+  // you tell one folder from another. A folder holding no files cannot appear at all, which is why the
+  // setup instructions say to drop a marker file into it. Busiest folder first. Pure, unit-tested.
   function groupFilesByFolder(files) {
     const byFolder = {}, order = [];
     (files || []).forEach(f => {
@@ -2627,7 +2632,10 @@ var BioprintTracker = {};
       // sort by plate order (confirmed in the tenant 2026-07-30: the list put WP031 above WP001). The
       // consumable code is not lost, it has its own `Wellplate` field. Taken from the label ("Plate 2")
       // so it stays the file's ordinal when only some plates are logged, falling back to position.
-      const labelOrdinal = String(p.label || '').match(/(\d+)/);
+      // Anchored on "Plate N", not the first digit run in the label: a label like "96w Plate 2"
+      // would otherwise yield P96. Falls back to this plate's position when the label carries no
+      // plate number at all.
+      const labelOrdinal = String(p.label || '').match(/plate\s*(\d+)/i);
       const ordinal = labelOrdinal ? parseInt(labelOrdinal[1], 10) : (i + 1);
       // Only a plate with an identity of its own is numbered. A run synthesized without plates (the
       // fallback above, and older callers) has none, and stays suffix-free rather than gaining "_P1".
@@ -3011,7 +3019,7 @@ var BioprintTracker = {};
             // Passage is optional and NOT in the print file (the printer doesn't know it), entered
             // here per plate. Like cell line / concentration it can be multi-valued: one per cell
             // line, comma-separated in the SAME order, so "Cell A, Cell B" at p12/p8 -> "12, 8".
-            `<div class="bpt-wiz-head"><span class="bpt-wiz-title">Plate ${i + 1} of ${plates.length}${plate.plate ? ` · ${esc(plate.plate)}` : ''}</span>${locked ? `<span class="bpt-wiz-sub">${esc(locked)}</span>` : ''}</div><div class="bpt-wiz-map" id="bpt-wiz-map"></div><div class="bpt-plate-form"><div class="bpt-field"><label>Cell line *</label><input class="bpt-inp bpt-pl-cellline" type="text" list="bpt-cellline-list" placeholder="e.g. MDA-MB-231" value="${esc(v.cell_line)}"${ro}></div><div class="bpt-field"><label>Concentration (cells/mL) *</label><input class="bpt-inp bpt-pl-conc" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 9400000" value="${esc(v.concentration)}"${ro}></div><div class="bpt-field bpt-sf-2"><label>Passage number</label><input class="bpt-inp bpt-pl-passage" type="text" placeholder="e.g. 12  (or 12, 8, 20 — one per cell line, same order)" value="${esc(v.passage)}"${ro}></div></div><div class="bpt-dym bpt-pl-dym" style="display:none;"></div><div class="bpt-field" style="margin-top:10px;"><label>Plate note</label><textarea class="bpt-inp bpt-pl-note" rows="2" placeholder="anything specific to THIS plate, e.g. nozzle 3 clogged"${ro}>${esc(v.note)}</textarea></div><div class="bpt-wiz-nav"><button type="button" class="bpt-wiz-btn" id="bpt-wiz-prev"${i === 0 ? ' disabled' : ''}>‹ Previous plate</button><div class="bpt-wiz-dots">${dots}</div><button type="button" class="bpt-wiz-btn" id="bpt-wiz-next"${i === plates.length - 1 ? ' disabled' : ''}>Next plate ›</button></div><div class="bpt-wiz-approve-row"><button type="button" class="bpt-wiz-btn bpt-wiz-approve${isApproved ? ' done' : ''}" id="bpt-wiz-approve">${isApproved ? '✓ Approved — click to edit' : 'Approve plate'}</button></div>${isApproved ? '<p class="bpt-wiz-status" style="margin-top:6px;">This plate’s fields are locked while it is approved. Click <b>✓ Approved</b> above to change them.</p>' : ''}<div class="bpt-wiz-status" id="bpt-wiz-status"></div>`;
+            `<div class="bpt-wiz-head"><span class="bpt-wiz-title">Plate ${i + 1} of ${plates.length}${plate.plate ? ` · ${esc(plate.plate)}` : ''}</span>${locked ? `<span class="bpt-wiz-sub">${esc(locked)}</span>` : ''}</div><div class="bpt-wiz-map" id="bpt-wiz-map"></div><div class="bpt-plate-form"><div class="bpt-field"><label>Cell line *</label><input class="bpt-inp bpt-pl-cellline" type="text" list="bpt-cellline-list" placeholder="e.g. MDA-MB-231" value="${esc(v.cell_line)}"${ro}></div><div class="bpt-field"><label>Concentration (cells/mL) *</label><input class="bpt-inp bpt-pl-conc" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 9400000" value="${esc(v.concentration)}"${ro}></div><div class="bpt-field bpt-sf-2"><label>Passage number</label><input class="bpt-inp bpt-pl-passage" type="text" placeholder="e.g. 12  (or 12, 8, 20 — one per cell line, same order)" value="${esc(v.passage)}"${ro}></div></div><div class="bpt-dym bpt-pl-dym" style="display:none;"></div><div class="bpt-field" style="margin-top:10px;"><label>Plate note</label><textarea class="bpt-inp bpt-pl-note" rows="2" placeholder="anything specific to THIS plate, e.g. nozzle 3 clogged"${ro}>${esc(v.note)}</textarea></div><div class="bpt-wiz-nav"><button type="button" class="bpt-wiz-btn" id="bpt-wiz-prev"${i === 0 ? ' disabled' : ''}>‹ Previous plate</button><div class="bpt-wiz-dots">${dots}</div><button type="button" class="bpt-wiz-btn" id="bpt-wiz-next"${i === plates.length - 1 ? ' disabled' : ''}>Next plate ›</button></div><div class="bpt-wiz-approve-row"><button type="button" class="bpt-wiz-btn bpt-wiz-approve${isApproved ? ' done' : ''}" id="bpt-wiz-approve">${isApproved ? '✓ Approved — click to edit' : 'Approve plate'}</button></div><div class="bpt-wiz-status" id="bpt-wiz-status"></div>`;
           renderPlateMapInto(rehydrate(plate.rows), document.getElementById('bpt-wiz-map'));
           // Suggestions are pointless on a frozen field, so they are only wired while editable.
           if (!isApproved) {

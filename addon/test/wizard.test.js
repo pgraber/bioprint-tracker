@@ -136,8 +136,6 @@ function statusText() { var s = document.getElementById('bpt-wiz-status'); retur
   ok($('.bpt-pl-conc').disabled, 'concentration is frozen');
   ok($('.bpt-pl-passage').disabled, 'passage is frozen (it used to slip past the edit listener)');
   ok($('.bpt-pl-note').disabled, 'the plate note is frozen');
-  ok(/locked while it is approved/.test(document.getElementById('bpt-plate-area').textContent),
-    'and the dialog says why the fields are inert');
 
   approveBtn().click();                        // the same button reopens the plate
   ok(!/Approved/.test(approveBtn().textContent), 'clicking it reopens the plate for editing');

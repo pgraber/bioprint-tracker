@@ -308,7 +308,10 @@ name) when it becomes a canonical case worth locking in.
      list points at a folder the add-on has just read files out of, so it is known to exist. This is
      also why step 1 says to drop a marker file in: a folder holding no files cannot be listed.
   - **Since v1.1.0 the add-on writes this setting itself** (`PUT /api/v1/addons/configuration`),
-    so it no longer depends on the platform's **Configure** dialog. That dialog is still a valid
+    so it no longer depends on the platform's **Configure** dialog. **Not yet confirmed in a live
+    tenant**: the request shapes come from the API reference, not from a call watched succeeding, so
+    expect to check this once on first use. A failure reports the real status and response rather
+    than failing quietly. The `scope` value is the most likely thing to need correcting. That dialog is still a valid
     second route and writes the same value; it rendered empty in a production tenant while working in the
     sandbox (2026-07-31), which is what prompted the change. Setting `CONFIG.PDF_FOLDER_ID` in the
     code remains a third route, needed only if neither of the above is available.
