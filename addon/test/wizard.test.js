@@ -122,31 +122,29 @@ function statusText() { var s = document.getElementById('bpt-wiz-status'); retur
   approveBtn().click();
   ok(/whole number/i.test(statusText()), 'non-numeric concentration -> approve refused');
 
-  // ── 3. Valid -> approve; then editing un-approves the plate (#1) ─────────────────
-  section('Editing after approving un-approves the plate');
+  // ── 3. Approving freezes the plate; reopening it unlocks (#1) ───────────────────
+  // An approved plate whose fields stay live means the badge claims something about content that can
+  // still move. Passage and note in particular slipped past the old un-approve-on-edit listeners, so
+  // a plate could read "Approved" while carrying content nobody approved.
+  section('Approving locks every field on the plate; the button reopens it');
   setInput('.bpt-pl-conc', '2000000');
   approveBtn().click();
-  await tick();                                // approve advances to plate 2 (last-plate re-renders in place)
-  // We advanced to plate 2 — go Back to plate 1 to check its approved state persisted.
-  document.getElementById('bpt-wiz-prev').click();
+  await tick();
   ok(/✓ Approved/.test(approveBtn().textContent), 'plate 1 shows approved after a valid approve');
-  setInput('.bpt-pl-cellline', 'Cell A2');     // edit after approving
-  ok(!/Approved/.test(approveBtn().textContent), 'editing a field cleared the approval');
+  ok(/click to edit/.test(approveBtn().textContent), 'the button says what clicking it does');
+  ok($('.bpt-pl-cellline').disabled, 'cell line is frozen while approved');
+  ok($('.bpt-pl-conc').disabled, 'concentration is frozen');
+  ok($('.bpt-pl-passage').disabled, 'passage is frozen (it used to slip past the edit listener)');
+  ok($('.bpt-pl-note').disabled, 'the plate note is frozen');
+  ok(/locked while it is approved/.test(document.getElementById('bpt-plate-area').textContent),
+    'and the dialog says why the fields are inert');
 
-  // ── 3b. Clicking an already-approved button toggles it back off, staying on the same plate ──────
-  section('Clicking "✓ Approved" again un-approves the plate without advancing');
-  setInput('.bpt-pl-cellline', 'Cell A'); setInput('.bpt-pl-conc', '2000000'); // restore a valid value
-  approveBtn().click(); await tick();          // approve plate 1 again
+  approveBtn().click();                        // the same button reopens the plate
+  ok(!/Approved/.test(approveBtn().textContent), 'clicking it reopens the plate for editing');
+  ok(!$('.bpt-pl-cellline').disabled, 'fields are editable again once reopened');
+  ok(!$('.bpt-pl-conc').disabled, 'including concentration');
   ok(/Plate 1 of 2/.test(document.getElementById('bpt-plate-area').textContent),
-    'approving stays on the current plate (it does not navigate)');
-  document.getElementById('bpt-wiz-next').click(); // forward by the nav control
-  ok(/Plate 2 of 2/.test(document.getElementById('bpt-plate-area').textContent), 'Next moves forward');
-  document.getElementById('bpt-wiz-prev').click(); // back to plate 1
-  ok(/✓ Approved/.test(approveBtn().textContent), 'plate 1 is approved again before the toggle test');
-  approveBtn().click();                        // click the ALREADY-approved button
-  ok(!/Approved/.test(approveBtn().textContent), 'clicking it again un-approves the plate (toggle)');
-  ok(/Plate 1 of 2/.test(document.getElementById('bpt-plate-area').textContent),
-    'un-approving stays on the same plate');
+    'reopening stays on the same plate')
 
   // ── 3b. Navigation and approval are INDEPENDENT ─────────────────────────────────
   // The trap this replaced: approving was the only way to advance, and an approved plate's button
@@ -177,23 +175,42 @@ function statusText() { var s = document.getElementById('bpt-wiz-status'); retur
 
   // ── 4. Per-plate concentration differs (the #3 payoff) ──────────────────────────
   section('Plate 2 keeps its OWN concentration, not the protocol default');
-  setInput('.bpt-pl-cellline', 'Cell A');      // restore plate 1
-  approveBtn().click(); await tick();          // approve plate 1
-  document.getElementById('bpt-wiz-next').click();
+  function dots() { return document.querySelectorAll('#bpt-plate-area [data-bpt-step]'); }
+  function goPlate(n) { dots()[n - 1].click(); }
+  function approveHere(cell, conc) {
+    if (/Approved/.test(approveBtn().textContent)) return;   // already done
+    if (cell != null) setInput('.bpt-pl-cellline', cell);
+    if (conc != null) setInput('.bpt-pl-conc', conc);
+    approveBtn().click();
+  }
+  goPlate(2);
   ok(/Plate 2 of 2/.test(document.getElementById('bpt-plate-area').textContent), 'now on plate 2');
   eq($('.bpt-pl-conc').value, '3000000', 'plate 2 pre-fills 3M (its own), not the 2M protocol default');
 
-  // ── 5. Create is blocked until every plate is approved ──────────────────────────
-  section('Create refused while a plate is unapproved; no records created');
-  document.getElementById('bpt-btn-0').click(); // "Create plate records" — plate 2 not yet approved
+  // ── 5. Create is blocked until every plate is approved, and says which ones ─────
+  section('Create refused while a plate is unapproved; it names the plate and goes there');
+  goPlate(1);
+  if (/Approved/.test(approveBtn().textContent)) approveBtn().click();   // ensure plate 1 is open
+  goPlate(2);
+  if (/Approved/.test(approveBtn().textContent)) approveBtn().click();   // and plate 2 too
+  approveHere('Cell B', '3000000');                                       // approve ONLY plate 2
+  await tick();
+  document.getElementById('bpt-btn-0').click();
   await tick();
   var err = document.getElementById('bpt-err');
-  ok(err && err.style.display !== 'none' && /[Aa]pprove/.test(err.textContent), 'Create blocked with an approve message');
+  ok(err && err.style.display !== 'none', 'Create is blocked with a visible message');
+  // Restating the rule does not help when one plate out of several is the problem: name it.
+  ok(/Plate 1 has not been approved/.test(err.textContent),
+    'the message names the unapproved plate (' + err.textContent + ')');
+  ok(/1 of 2 still to approve/.test(err.textContent), 'and says how many are outstanding');
+  ok(/Plate 1 of 2/.test(document.getElementById('bpt-plate-area').textContent),
+    'and the wizard moves to that plate so it does not have to be hunted for');
   eq(api.posts, 0, 'nothing was created');
 
   // ── 6. Happy path: approve all -> create -> results dialog with barcodes ────────
   section('Approve all -> Create -> results dialog lists the barcodes');
-  approveBtn().click(); await tick();           // approve plate 2 (both approved now)
+  approveHere('Cell A', '2000000');             // plate 1, the one that was blocking
+  await tick();
   document.getElementById('bpt-btn-0').click(); await settle();
   eq(api.posts, 2, 'two plate records created');
   ok(/Plates created/.test(document.querySelector('.bpt-card-header').textContent), 'success dialog shown');

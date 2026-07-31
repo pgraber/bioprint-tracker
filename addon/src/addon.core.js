@@ -915,6 +915,13 @@ var BioprintTracker = {};
     return rows;
   }
 
+  // Join a short list the way a sentence does: "2", "2 and 3", "2, 3 and 5".
+  function listPhrase(items) {
+    const a = (items || []).map(String);
+    if (a.length <= 1) return a.join('');
+    return `${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}`;
+  }
+
   function csvEscape(v) {
     v = String(v == null ? '' : v);
     return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
@@ -1435,12 +1442,18 @@ var BioprintTracker = {};
       '.bpt-wiz-dot{width:8px;height:8px;border-radius:50%;background:#d8dce1;}' +
       '.bpt-wiz-dot.active{background:#4f46e5;}' +
       '.bpt-wiz-dot.done{background:#16a34a;}' +   // approved plate
-      // Dots jump to a plate, so they are click targets. The visible dot stays 8px while padding
-      // (clipped out of the background) grows the hit area to 24px, the WCAG 2.2 minimum.
-      '.bpt-wiz-dot{cursor:pointer;padding:8px;background-clip:content-box;}' +
-      '.bpt-wiz-dots{gap:0;}' +
-      '.bpt-wiz-dot:hover,.bpt-wiz-dot:focus{outline:2px solid #c7d2fe;outline-offset:-4px;}' +
+      // Dots jump to a plate, so they need a 24px hit area (the WCAG 2.2 minimum) around an 8px
+      // mark. That is a transparent BUTTON wrapping the dot, not padding on the dot itself: padding
+      // plus background-clip made the dot's painted area depend on the host's box-sizing, and under
+      // border-box it collapsed to nothing, so unapproved dots disappeared entirely.
+      '.bpt-wiz-dotbtn{background:none;border:0;padding:8px;margin:0;line-height:0;cursor:pointer;' +
+        'border-radius:50%;}' +
+      '.bpt-wiz-dotbtn:hover,.bpt-wiz-dotbtn:focus-visible{outline:2px solid #c7d2fe;outline-offset:-2px;}' +
+      '.bpt-wiz-dots{gap:0;align-items:center;}' +
       '.bpt-wiz-approve-row{display:flex;justify-content:center;margin-top:10px;}' +
+      // A frozen field must stay READABLE. The browser default washes disabled text out until it
+      // looks broken rather than deliberately locked.
+      '.bpt-inp:disabled{background:#f6f8fa;color:#334155;opacity:1;cursor:default;}' +
       '.bpt-steps>div{margin:0 0 6px;}' +
       // table-layout:fixed makes the <colgroup> widths bind; without it a long filename widens its
       // own column and squeezes the folder number and the button out of shape.
@@ -2679,6 +2692,11 @@ var BioprintTracker = {};
     // that lives inside afterRender's per-plate wizard.
     let collectPlateGroups = null;
     let platesAllApproved = () => false;
+    // Which plates are still unapproved (1-based, in file order), and a jump to a given one. The
+    // submit button needs both: naming the plates that are blocking is more use than "approve every
+    // plate", and landing the user on the first one saves them hunting for it.
+    let unapprovedPlateNumbers = () => [];
+    let goToPlate = () => {};
 
     // When no protocols came back, show exactly what the list call returned so the cause is visible
     // without the console: wrong type ID, an envelope we didn't parse, or an API error.
@@ -2944,11 +2962,20 @@ var BioprintTracker = {};
           const plates = wiz.plates, plate = plates[i], key = plateKey(plate);
           wiz.step = i;
           const v = plateVals(plate);
+          // Approving FREEZES the plate: an approved plate whose fields are still live means the
+          // badge is a claim about content that can keep moving, and passage/note edits used to slip
+          // past the old un-approve-on-edit listeners entirely. Frozen, "approved" means exactly
+          // "this content is what will be created". Reopening is one click on the same button.
+          const isApproved = !!wiz.approved[key];
+          const ro = isApproved ? ' disabled' : '';
           const locked = [shortWellplate(plate.wellplate), plate.matrix_codes].filter(Boolean).join(' · ');
           // Dots double as a jump target: with more than two or three plates, stepping through with
           // Back/Next to reach one plate is tedious. title= names the plate for a screen reader and
           // on hover, since a dot alone says nothing.
-          const dots = plates.map((p, j) => `<span class="bpt-wiz-dot${j === i ? ' active' : ''}${wiz.approved[plateKey(p)] ? ' done' : ''}" data-bpt-step="${j}" role="button" tabindex="0" title="Plate ${j + 1}${wiz.approved[plateKey(p)] ? ' (approved)' : ''}"></span>`).join('');
+          const dots = plates.map((p, j) => {
+            const done = !!wiz.approved[plateKey(p)];
+            return `<button type="button" class="bpt-wiz-dotbtn" data-bpt-step="${j}" title="Plate ${j + 1}${done ? ' (approved)' : ' (not approved yet)'}" aria-label="Go to plate ${j + 1}${done ? ', approved' : ', not approved yet'}"><span class="bpt-wiz-dot${j === i ? ' active' : ''}${done ? ' done' : ''}"></span></button>`;
+          }).join('');
           document.getElementById('bpt-plate-area').innerHTML =
             // type="text" + inputmode=numeric instead of type="number": the eLabNext host
             // stylesheet forces input[type=number] to a fixed narrow width (even over an inline
@@ -2957,26 +2984,13 @@ var BioprintTracker = {};
             // Passage is optional and NOT in the print file (the printer doesn't know it), entered
             // here per plate. Like cell line / concentration it can be multi-valued: one per cell
             // line, comma-separated in the SAME order, so "Cell A, Cell B" at p12/p8 -> "12, 8".
-            `<div class="bpt-wiz-head"><span class="bpt-wiz-title">Plate ${i + 1} of ${plates.length}${plate.plate ? ` · ${esc(plate.plate)}` : ''}</span>${locked ? `<span class="bpt-wiz-sub">${esc(locked)}</span>` : ''}</div><div class="bpt-wiz-map" id="bpt-wiz-map"></div><div class="bpt-plate-form"><div class="bpt-field"><label>Cell line *</label><input class="bpt-inp bpt-pl-cellline" type="text" list="bpt-cellline-list" placeholder="e.g. MDA-MB-231" value="${esc(v.cell_line)}"></div><div class="bpt-field"><label>Concentration (cells/mL) *</label><input class="bpt-inp bpt-pl-conc" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 9400000" value="${esc(v.concentration)}"></div><div class="bpt-field bpt-sf-2"><label>Passage number</label><input class="bpt-inp bpt-pl-passage" type="text" placeholder="e.g. 12  (or 12, 8, 20 — one per cell line, same order)" value="${esc(v.passage)}"></div></div><div class="bpt-dym bpt-pl-dym" style="display:none;"></div><div class="bpt-field" style="margin-top:10px;"><label>Plate note</label><textarea class="bpt-inp bpt-pl-note" rows="2" placeholder="anything specific to THIS plate, e.g. nozzle 3 clogged">${esc(v.note)}</textarea></div><div class="bpt-wiz-nav"><button type="button" class="bpt-wiz-btn" id="bpt-wiz-prev"${i === 0 ? ' disabled' : ''}>‹ Previous plate</button><div class="bpt-wiz-dots">${dots}</div><button type="button" class="bpt-wiz-btn" id="bpt-wiz-next"${i === plates.length - 1 ? ' disabled' : ''}>Next plate ›</button></div><div class="bpt-wiz-approve-row"><button type="button" class="bpt-wiz-btn bpt-wiz-approve${wiz.approved[key] ? ' done' : ''}" id="bpt-wiz-approve">${wiz.approved[key] ? '✓ Approved — click to undo' : 'Approve plate'}</button></div><div class="bpt-wiz-status" id="bpt-wiz-status"></div>`;
+            `<div class="bpt-wiz-head"><span class="bpt-wiz-title">Plate ${i + 1} of ${plates.length}${plate.plate ? ` · ${esc(plate.plate)}` : ''}</span>${locked ? `<span class="bpt-wiz-sub">${esc(locked)}</span>` : ''}</div><div class="bpt-wiz-map" id="bpt-wiz-map"></div><div class="bpt-plate-form"><div class="bpt-field"><label>Cell line *</label><input class="bpt-inp bpt-pl-cellline" type="text" list="bpt-cellline-list" placeholder="e.g. MDA-MB-231" value="${esc(v.cell_line)}"${ro}></div><div class="bpt-field"><label>Concentration (cells/mL) *</label><input class="bpt-inp bpt-pl-conc" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 9400000" value="${esc(v.concentration)}"${ro}></div><div class="bpt-field bpt-sf-2"><label>Passage number</label><input class="bpt-inp bpt-pl-passage" type="text" placeholder="e.g. 12  (or 12, 8, 20 — one per cell line, same order)" value="${esc(v.passage)}"${ro}></div></div><div class="bpt-dym bpt-pl-dym" style="display:none;"></div><div class="bpt-field" style="margin-top:10px;"><label>Plate note</label><textarea class="bpt-inp bpt-pl-note" rows="2" placeholder="anything specific to THIS plate, e.g. nozzle 3 clogged"${ro}>${esc(v.note)}</textarea></div><div class="bpt-wiz-nav"><button type="button" class="bpt-wiz-btn" id="bpt-wiz-prev"${i === 0 ? ' disabled' : ''}>‹ Previous plate</button><div class="bpt-wiz-dots">${dots}</div><button type="button" class="bpt-wiz-btn" id="bpt-wiz-next"${i === plates.length - 1 ? ' disabled' : ''}>Next plate ›</button></div><div class="bpt-wiz-approve-row"><button type="button" class="bpt-wiz-btn bpt-wiz-approve${isApproved ? ' done' : ''}" id="bpt-wiz-approve">${isApproved ? '✓ Approved — click to edit' : 'Approve plate'}</button></div>${isApproved ? '<p class="bpt-wiz-status" style="margin-top:6px;">This plate’s fields are locked while it is approved. Click <b>✓ Approved</b> above to change them.</p>' : ''}<div class="bpt-wiz-status" id="bpt-wiz-status"></div>`;
           renderPlateMapInto(rehydrate(plate.rows), document.getElementById('bpt-wiz-map'));
-          attachDidYouMean(document.querySelector('#bpt-plate-area .bpt-pl-cellline'),
-            cellLineValues, document.querySelector('#bpt-plate-area .bpt-pl-dym'));
-          // Editing a field AFTER approving must un-approve the plate, otherwise the stale flag would
-          // let a since-blanked/invalid value be created. Clear it live, without a full re-render (so
-          // focus/typing isn't lost); just reflect it on the button, the dot and the status line.
-          function unApproveOnEdit() {
-            if (!wiz.approved[key]) return;
-            wiz.approved[key] = false;
-            const ab = document.getElementById('bpt-wiz-approve');
-            if (ab) { ab.textContent = 'Approve plate'; ab.classList.remove('done'); }
-            const dots2 = document.querySelectorAll('#bpt-plate-area .bpt-wiz-dot');
-            if (dots2[wiz.step]) dots2[wiz.step].classList.remove('done');
-            updateStatus();
+          // Suggestions are pointless on a frozen field, so they are only wired while editable.
+          if (!isApproved) {
+            attachDidYouMean(document.querySelector('#bpt-plate-area .bpt-pl-cellline'),
+              cellLineValues, document.querySelector('#bpt-plate-area .bpt-pl-dym'));
           }
-          const clEl = document.querySelector('#bpt-plate-area .bpt-pl-cellline');
-          const ccEl = document.querySelector('#bpt-plate-area .bpt-pl-conc');
-          if (clEl) clEl.addEventListener('input', unApproveOnEdit);
-          if (ccEl) ccEl.addEventListener('input', unApproveOnEdit);
           // Moving between plates and approving a plate are SEPARATE actions. Approving used to be
           // the only thing that advanced, while an approved plate's button un-approved instead of
           // advancing, so returning to an earlier plate left no way forward except withdrawing and
@@ -2989,13 +3003,11 @@ var BioprintTracker = {};
           }
           document.getElementById('bpt-wiz-prev').onclick = () => { goTo(wiz.step - 1); };
           document.getElementById('bpt-wiz-next').onclick = () => { goTo(wiz.step + 1); };
-          const dotEls = document.querySelectorAll('#bpt-plate-area .bpt-wiz-dot');
+          // The button handles Enter/Space itself, so no key handling is needed here.
+          const dotEls = document.querySelectorAll('#bpt-plate-area [data-bpt-step]');
           Array.prototype.forEach.call(dotEls, d => {
             const j = parseInt(d.getAttribute('data-bpt-step'), 10);
             d.onclick = () => { goTo(j); };
-            d.onkeydown = ev => {
-              if (ev && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); goTo(j); }
-            };
           });
           // Approving stays on the current plate. An already-approved plate un-approves on click, so
           // withdrawing approval is deliberate rather than a side effect of trying to move.
@@ -3029,6 +3041,13 @@ var BioprintTracker = {};
             });
           };
           platesAllApproved = () => wiz.plates.length > 0 && wiz.plates.every(p => wiz.approved[plateKey(p)]);
+          unapprovedPlateNumbers = () => wiz.plates
+            .map((p, j) => (wiz.approved[plateKey(p)] ? 0 : j + 1))
+            .filter(Boolean);
+          goToPlate = n => {
+            const j = n - 1;
+            if (j >= 0 && j < wiz.plates.length && j !== wiz.step) { saveCurrentStep(); renderStep(j); }
+          };
           renderStep(0);
         }
 
@@ -3038,7 +3057,14 @@ var BioprintTracker = {};
       },
       customButtons: [{ label: 'Create plate records', fn() {
         const errEl = document.getElementById('bpt-err'); errEl.style.display = 'none';
-        function fail(msg) { errEl.textContent = msg; errEl.style.display = 'block'; }
+        // Scrolled into view because the message sits at the foot of a long form: without this the
+        // button appears to do nothing when the reason is below the fold. Guarded, since not every
+        // environment implements scrollIntoView.
+        function fail(msg) {
+          errEl.textContent = msg;
+          errEl.style.display = 'block';
+          if (typeof errEl.scrollIntoView === 'function') errEl.scrollIntoView({ block: 'nearest' });
+        }
         const protoEl = document.getElementById('inp-protocol');
         // Collect the (possibly several) reagent lots straight from the DOM, joined into one value.
         function lots(kind) {
@@ -3062,8 +3088,18 @@ var BioprintTracker = {};
         if (!plates || !plates.length) return fail('Choose a protocol so its plates load.');
         if (!run.printer) return fail('Printer is required.');
         if (!run.date) return fail('Date is required.');
-        if (!platesAllApproved()) return fail('Approve every plate (with its cell line and ' +
-          'concentration) before creating the records.');
+        if (!platesAllApproved()) {
+          // Name what is blocking rather than restating the rule, and land the user on the first
+          // plate that needs attention so they do not have to find it.
+          const pending = unapprovedPlateNumbers();
+          const which = pending.length === 1
+            ? `Plate ${pending[0]} has not been approved yet`
+            : `Plates ${listPhrase(pending)} have not been approved yet`;
+          const of = ` (${pending.length} of ${plates.length} still to approve).`;
+          if (pending.length) goToPlate(pending[0]);
+          return fail(`Nothing was created. ${which}${of} Check its cell line and concentration, ` +
+            'then press Approve plate. Every plate has to be approved before the records are made.');
+        }
         // Backstop: re-validate the LIVE values, not just the approval flags, so a plate that was
         // approved then edited to a blank/invalid value can never be created.
         for (let pi = 0; pi < plates.length; pi++) {
@@ -3253,6 +3289,7 @@ var BioprintTracker = {};
       stampMetaIDs,
       groupFilesByFolder,
       shortenMiddle,
+      listPhrase,
       getInstalledAddon,
       readStoredConfig,
       saveStoredConfig,

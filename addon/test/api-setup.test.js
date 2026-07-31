@@ -216,6 +216,17 @@ section('shortenMiddle: keep both ends of a long filename');
   eq(T.shortenMiddle(null, 30), '', 'a missing name yields an empty string, not "null"');
 })();
 
+// ── J. listPhrase ───────────────────────────────────────────────────────────────────
+// Used to name the plates blocking a create. "2, 3 and 5" reads as a sentence; "2,3,5" reads as data.
+section('listPhrase: join a short list the way a sentence does');
+(function () {
+  eq(T.listPhrase([2]), '2', 'one item stands alone');
+  eq(T.listPhrase([2, 3]), '2 and 3', 'two items are joined by "and", with no comma');
+  eq(T.listPhrase([2, 3, 5]), '2, 3 and 5', 'three or more use commas then a final "and"');
+  eq(T.listPhrase([]), '', 'an empty list yields an empty string');
+  eq(T.listPhrase(null), '', 'a null list is tolerated');
+})();
+
 console.log('\n' + (failed === 0 ? '✓ ALL PASSED' : '✗ FAILURES') +
   ' — ' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed === 0 ? 0 : 1);
