@@ -1473,6 +1473,14 @@ var BioprintTracker = {};
       // own column and squeezes the folder number and the button out of shape.
       '.bpt-folder-table{table-layout:fixed;width:100%;}' +
       '.bpt-folder-table td,.bpt-folder-table th{vertical-align:middle;}' +
+      // A tenant can hold many folders. The list scrolls in its OWN region rather than letting the
+      // dialog body grow: that keeps the instructions above and, more importantly, the save
+      // confirmation below it on screen, instead of pushing the confirmation out of view when the
+      // folder clicked was near the bottom of a long list.
+      '.bpt-folder-scroll{max-height:320px;overflow-y:auto;border:1px solid #eef0f3;border-radius:8px;padding:0 8px;}' +
+      // The column headings stay put while that region scrolls, so a row deep in the list can still
+      // be read. z-index keeps them above the cells they scroll over.
+      '.bpt-folder-table th{position:sticky;top:0;background:#fff;z-index:1;}' +
       '.bpt-wiz-approve{border-color:#4f46e5;color:#4338ca;}' +
       '.bpt-wiz-approve.done{background:#dcfce7;border-color:#16a34a;color:#15803d;}' +
       '.bpt-wiz-status{font-size:12px;color:#475569;margin-top:8px;text-align:center;}' +
@@ -1555,9 +1563,27 @@ var BioprintTracker = {};
     overlay.innerHTML =
       `<div class="bpt-card" style="width:${config.width || 400}px;"><div class="bpt-card-header">${esc(config.title || '')}</div><div class="bpt-card-body">${config.content || ''}</div><div class="bpt-card-footer"><button id="bpt-cancel" class="bpt-btn bpt-btn-secondary">${esc(config.btnCancelLabel || 'Close')}</button>${btnHTML}</div></div>`;
     document.body.appendChild(overlay);
+    // config.confirmDiscard marks a dialog whose contents are lost on exit (a form that has not been
+    // submitted). Any edit inside it sets a dirty flag, and only then does leaving ask. Tracking real
+    // edits rather than "has fields" keeps an untouched form from nagging on the way out. Programmatic
+    // pre-fills do not fire input/change, so they correctly leave the form clean; a choice made by
+    // clicking (selecting a protocol) calls markDialogDirty itself.
+    if (config.confirmDiscard) {
+      const card = overlay.querySelector('.bpt-card');
+      if (card) {
+        const mark = () => { overlay.setAttribute('data-bpt-dirty', '1'); };
+        card.addEventListener('input', mark);
+        card.addEventListener('change', mark);
+      }
+    }
     // config.onCancel lets a dialog send the cancel/"Back" button somewhere other than closing
     // outright (e.g. back to the previous step), while clicking outside the dialog always just closes.
     document.getElementById('bpt-cancel').onclick = () => {
+      // window.confirm, not a dialog of our own: our dialogs replace the current one, which would
+      // destroy the very form the user might choose to keep.
+      if (overlay.getAttribute('data-bpt-dirty') === '1' &&
+        typeof window !== 'undefined' && typeof window.confirm === 'function' &&
+        !window.confirm('Leave this form? Anything entered here will be lost.')) return;
       if (config.onCancel) { try { config.onCancel(); } catch (e) { console.error('Bioprint Tracker add-on error:', e); } }
       else closeModal();
     };
@@ -1571,6 +1597,13 @@ var BioprintTracker = {};
       };
     });
     if (config.afterRender) config.afterRender();
+  }
+
+  // Marks the open dialog as having unsaved input, for a choice made by clicking rather than typing
+  // (input/change never fires for those, so the delegated listeners in showDialog cannot see it).
+  function markDialogDirty() {
+    const el = document.getElementById('bpt-modal-overlay');
+    if (el) el.setAttribute('data-bpt-dirty', '1');
   }
 
   function showError(title, msg) {
@@ -1805,7 +1838,9 @@ var BioprintTracker = {};
     const describe = id => (id ? `folder number ${esc(id)}` : 'the main file area (no folder chosen)');
     showDialog({
       width: 640, title: 'Choose your file folder',
-      btnCancelLabel: 'Back', onCancel() { addon.showSetupHub(); },
+      // The exit button names its destination. A bare "Back" makes the reader reconstruct where
+      // they came from, and in the run dialog it collided with the wizard's own plate-level Back.
+      btnCancelLabel: '‹ Back to setup', onCancel() { addon.showSetupHub(); },
       content:
         `<p class="bpt-hint" style="margin:0 0 10px;">Files are being saved in: <b id="bpt-folder-current">${describe(current)}</b>.</p>` +
         '<p class="bpt-hint" style="margin:0 0 12px;">Keeping uploaded files in one folder needs that ' +
@@ -1818,7 +1853,7 @@ var BioprintTracker = {};
           '<div><b>2.</b> Find that file in the list below and press <b>Use this folder</b> next ' +
             'to it.</div>' +
         '</div>' +
-        '<div id="bpt-folder-list"><p class="bpt-hint">Loading folders…</p></div>' +
+        '<div id="bpt-folder-list" class="bpt-folder-scroll"><p class="bpt-hint">Loading folders…</p></div>' +
         '<div id="bpt-folder-status" style="margin:10px 0 0;"></div>',
       // There is deliberately no "type a folder number" box. A typed number cannot be checked: there
       // is no endpoint to confirm a folder exists or belongs to this group, and placement is accepted
@@ -1869,10 +1904,14 @@ var BioprintTracker = {};
               : `<button type="button" class="bpt-btn bpt-btn-secondary" style="margin:0;padding:5px 10px;white-space:nowrap;" data-bpt-folder="${esc(r.id)}">Use this folder</button>`;
             // The chosen row is marked three ways (tint, left rule, and the tick) rather than by
             // colour alone, which would be invisible to a colourblind reader and easy to miss.
-            const rowStyle = isCur
-              ? ' style="background:#eef6ff;box-shadow:inset 3px 0 0 #4f46e5;"'
-              : '';
-            return `<tr${rowStyle}><td style="white-space:nowrap;"><b>${label}</b>${mark}</td><td style="overflow-wrap:anywhere;"${egFull}>${eg}</td><td>${esc(r.count)}</td><td>${action}</td></tr>`;
+            // The rule is a BORDER on the first cell, not an inset shadow on the row: a row-level
+            // inset shadow paints inside the first cell and ran underneath the folder number. Both
+            // states reserve the same 11px on the left, so text stays aligned as the mark moves.
+            const rowStyle = isCur ? ' style="background:#eef6ff;"' : '';
+            const firstCell = isCur
+              ? 'white-space:nowrap;border-left:3px solid #4f46e5;padding-left:8px;'
+              : 'white-space:nowrap;padding-left:11px;';
+            return `<tr${rowStyle}><td style="${firstCell}"><b>${label}</b>${mark}</td><td style="overflow-wrap:anywhere;"${egFull}>${eg}</td><td>${esc(r.count)}</td><td>${action}</td></tr>`;
           }).join('')}</table>`;
           const btns = document.querySelectorAll('[data-bpt-folder]');
           Array.prototype.forEach.call(btns, b => {
@@ -1995,7 +2034,7 @@ var BioprintTracker = {};
   addon.setupSampleTypes = () => {
     const names = Object.keys(REQUIRED_SAMPLE_TYPE_FIELDS);
     showDialog({ width: 560, title: 'Set up sample types',
-      btnCancelLabel: 'Back', onCancel() { addon.showSetupHub(); },
+      btnCancelLabel: '‹ Back to setup', onCancel() { addon.showSetupHub(); },
       content: `<div id="bpt-setup-status"><p class="bpt-hint">Working on ${esc(names.length)} sample types…</p></div>` });
     const results = [];
     let chain = Promise.resolve();
@@ -2036,7 +2075,7 @@ var BioprintTracker = {};
   addon.checkSampleTypes = () => {
     const names = Object.keys(REQUIRED_SAMPLE_TYPE_FIELDS);
     showDialog({ width: 560, title: 'Check sample types',
-      btnCancelLabel: 'Back', onCancel() { addon.showSetupHub(); },
+      btnCancelLabel: '‹ Back to setup', onCancel() { addon.showSetupHub(); },
       content: `<div id="bpt-check-status"><p class="bpt-hint">Checking ${esc(names.length)} sample types…</p></div>` });
     const results = [];
     let chain = Promise.resolve();
@@ -2078,10 +2117,11 @@ var BioprintTracker = {};
   addon.showProtocolForm = (prefill, protocolTypeID) => {
     showDialog({
       width: 520, title: 'Upload a print protocol',
-      // "Back" rather than "Close": this dialog is reached from the launcher menu, so the way out of
-      // a wrong choice is the menu, not the whole add-on. Anything typed here is discarded, the same
-      // as before, since nothing has been saved yet at this point.
-      btnCancelLabel: 'Back', onCancel() { addon.showMainDialog(); },
+      // Reached from the launcher menu, so the way out of a wrong choice is the menu, not the whole
+      // add-on. Nothing is saved until the primary button, so leaving discards what was typed, hence
+      // the confirm, which only fires once something has actually been entered.
+      btnCancelLabel: '‹ Back to menu', confirmDiscard: true,
+      onCancel() { addon.showMainDialog(); },
       content:
         // Printer version (RASTRUM vs Allegro) is NOT asked here, it is detected from the file on
         // parse and shown in the next step. The physical printer (the named machine) is chosen
@@ -2684,7 +2724,8 @@ var BioprintTracker = {};
       // Broad so a 384-well plate map and the two-column fields sit comfortably (capped at 90vw by
       // the modal, so it still fits smaller screens).
       width: 860, title: 'Log a print run',
-      btnCancelLabel: 'Back', onCancel() { addon.showMainDialog(); },
+      btnCancelLabel: '‹ Back to menu', confirmDiscard: true,
+      onCancel() { addon.showMainDialog(); },
       content:
         // Collapsed by default (no `open`) so it stays out of the way; click to expand. Pulled up
         // (negative margin on the wrapper, AND margin-top:0 on the <details> itself, the shared
@@ -2740,6 +2781,7 @@ var BioprintTracker = {};
           });
         }
         function choose(id, nm) {
+          markDialogDirty();   // picking a protocol is real work, but it fires no input/change event
           hiddenEl.value = id;
           hiddenEl.setAttribute('data-name', nm);
           searchEl.value = nm;
@@ -2944,7 +2986,7 @@ var BioprintTracker = {};
             // Passage is optional and NOT in the print file (the printer doesn't know it), entered
             // here per plate. Like cell line / concentration it can be multi-valued: one per cell
             // line, comma-separated in the SAME order, so "Cell A, Cell B" at p12/p8 -> "12, 8".
-            `<div class="bpt-wiz-head"><span class="bpt-wiz-title">Plate ${i + 1} of ${plates.length}${plate.plate ? ` · ${esc(plate.plate)}` : ''}</span>${locked ? `<span class="bpt-wiz-sub">${esc(locked)}</span>` : ''}</div><div class="bpt-wiz-map" id="bpt-wiz-map"></div><div class="bpt-plate-form"><div class="bpt-field"><label>Cell line *</label><input class="bpt-inp bpt-pl-cellline" type="text" list="bpt-cellline-list" placeholder="e.g. MDA-MB-231" value="${esc(v.cell_line)}"></div><div class="bpt-field"><label>Concentration (cells/mL) *</label><input class="bpt-inp bpt-pl-conc" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 9400000" value="${esc(v.concentration)}"></div><div class="bpt-field bpt-sf-2"><label>Passage number</label><input class="bpt-inp bpt-pl-passage" type="text" placeholder="e.g. 12  (or 12, 8, 20 — one per cell line, same order)" value="${esc(v.passage)}"></div></div><div class="bpt-dym bpt-pl-dym" style="display:none;"></div><div class="bpt-field" style="margin-top:10px;"><label>Plate note</label><textarea class="bpt-inp bpt-pl-note" rows="2" placeholder="anything specific to THIS plate, e.g. nozzle 3 clogged">${esc(v.note)}</textarea></div><div class="bpt-wiz-nav"><button type="button" class="bpt-wiz-btn" id="bpt-wiz-prev"${i === 0 ? ' disabled' : ''}>‹ Back</button><div class="bpt-wiz-dots">${dots}</div><button type="button" class="bpt-wiz-btn" id="bpt-wiz-next"${i === plates.length - 1 ? ' disabled' : ''}>Next ›</button></div><div class="bpt-wiz-approve-row"><button type="button" class="bpt-wiz-btn bpt-wiz-approve${wiz.approved[key] ? ' done' : ''}" id="bpt-wiz-approve">${wiz.approved[key] ? '✓ Approved — click to undo' : 'Approve plate'}</button></div><div class="bpt-wiz-status" id="bpt-wiz-status"></div>`;
+            `<div class="bpt-wiz-head"><span class="bpt-wiz-title">Plate ${i + 1} of ${plates.length}${plate.plate ? ` · ${esc(plate.plate)}` : ''}</span>${locked ? `<span class="bpt-wiz-sub">${esc(locked)}</span>` : ''}</div><div class="bpt-wiz-map" id="bpt-wiz-map"></div><div class="bpt-plate-form"><div class="bpt-field"><label>Cell line *</label><input class="bpt-inp bpt-pl-cellline" type="text" list="bpt-cellline-list" placeholder="e.g. MDA-MB-231" value="${esc(v.cell_line)}"></div><div class="bpt-field"><label>Concentration (cells/mL) *</label><input class="bpt-inp bpt-pl-conc" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="e.g. 9400000" value="${esc(v.concentration)}"></div><div class="bpt-field bpt-sf-2"><label>Passage number</label><input class="bpt-inp bpt-pl-passage" type="text" placeholder="e.g. 12  (or 12, 8, 20 — one per cell line, same order)" value="${esc(v.passage)}"></div></div><div class="bpt-dym bpt-pl-dym" style="display:none;"></div><div class="bpt-field" style="margin-top:10px;"><label>Plate note</label><textarea class="bpt-inp bpt-pl-note" rows="2" placeholder="anything specific to THIS plate, e.g. nozzle 3 clogged">${esc(v.note)}</textarea></div><div class="bpt-wiz-nav"><button type="button" class="bpt-wiz-btn" id="bpt-wiz-prev"${i === 0 ? ' disabled' : ''}>‹ Previous plate</button><div class="bpt-wiz-dots">${dots}</div><button type="button" class="bpt-wiz-btn" id="bpt-wiz-next"${i === plates.length - 1 ? ' disabled' : ''}>Next plate ›</button></div><div class="bpt-wiz-approve-row"><button type="button" class="bpt-wiz-btn bpt-wiz-approve${wiz.approved[key] ? ' done' : ''}" id="bpt-wiz-approve">${wiz.approved[key] ? '✓ Approved — click to undo' : 'Approve plate'}</button></div><div class="bpt-wiz-status" id="bpt-wiz-status"></div>`;
           renderPlateMapInto(rehydrate(plate.rows), document.getElementById('bpt-wiz-map'));
           attachDidYouMean(document.querySelector('#bpt-plate-area .bpt-pl-cellline'),
             cellLineValues, document.querySelector('#bpt-plate-area .bpt-pl-dym'));

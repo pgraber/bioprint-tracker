@@ -283,10 +283,52 @@ function statusText() { var s = document.getElementById('bpt-wiz-status'); retur
   addon.showFolderIdFinder();
   await settle();
   var cancelBtn = document.getElementById('bpt-cancel');
-  ok(cancelBtn && cancelBtn.textContent === 'Back', 'sub-dialog cancel button says "Back" (returns to hub)');
+  // The exit button names its destination: a bare "Back" is ambiguous, and in the run dialog it
+  // collided with the wizard's own plate-level Back.
+  ok(cancelBtn && /Back to setup/.test(cancelBtn.textContent),
+    'sub-dialog exit button names where it goes ("Back to setup")');
   cancelBtn.click();
   await settle();
   ok(/Bioprint Tracker setup/.test(document.body.textContent), 'clicking Back reopens the setup hub, not closes everything');
+
+  // ── 10. Leaving a form with unsaved input asks first; an untouched one does not ──
+  // Nothing in these forms is saved until the primary button, so exiting discards. The prompt must
+  // fire only when there is something to lose, otherwise it becomes noise people click through.
+  section('Back from a form confirms only when something was entered');
+  var confirmCalls = 0, confirmAnswer = true;
+  window.confirm = function () { confirmCalls++; return confirmAnswer; };
+
+  addon.showProtocolForm({}, 27889);
+  confirmCalls = 0;
+  document.getElementById('bpt-cancel').click();
+  await settle();
+  eq(confirmCalls, 0, 'an untouched form leaves without asking');
+  ok(/What would you like to do/.test(document.body.textContent), 'and lands on the launcher menu');
+
+  addon.showProtocolForm({}, 27889);
+  ok(/Back to menu/.test(document.getElementById('bpt-cancel').textContent),
+    'a form exit button names the menu as its destination');
+  setInput('#inp-name', 'Large Plug v2');       // now there is unsaved input
+  confirmCalls = 0; confirmAnswer = false;      // the user decides to stay
+  document.getElementById('bpt-cancel').click();
+  await settle();
+  eq(confirmCalls, 1, 'leaving a dirty form asks');
+  ok(document.getElementById('inp-name'), 'declining keeps the form open');
+  eq(document.getElementById('inp-name').value, 'Large Plug v2', 'and keeps what was typed');
+
+  confirmAnswer = true;                          // the user confirms the discard
+  document.getElementById('bpt-cancel').click();
+  await settle();
+  ok(/What would you like to do/.test(document.body.textContent), 'confirming leaves for the menu');
+
+  // The plate wizard's own navigation must not read as "leave the form" now the footer is adjacent.
+  section('Plate navigation is labelled by what it moves through');
+  await openWithProtocol();
+  ok(/Previous plate/.test(document.getElementById('bpt-wiz-prev').textContent),
+    'wizard back button says "Previous plate", not a bare "Back"');
+  ok(/Next plate/.test(document.getElementById('bpt-wiz-next').textContent), 'and forward says "Next plate"');
+  ok(/Back to menu/.test(document.getElementById('bpt-cancel').textContent),
+    'while the footer names the menu, so the two Backs cannot be confused');
 
   console.log('\n' + (failed === 0 ? '✓ ALL PASSED' : '✗ FAILURES') + ' — ' + passed + ' passed, ' + failed + ' failed');
   process.exit(failed === 0 ? 0 : 1);
