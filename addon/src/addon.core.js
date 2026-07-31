@@ -1817,7 +1817,7 @@ var BioprintTracker = {};
       content:
         `<p class="bpt-hint" style="margin:0 0 10px;">Files are being saved in: <b id="bpt-folder-current">${describe(current)}</b>.</p>` +
         '<p class="bpt-hint" style="margin:0 0 12px;">Keeping uploaded files in one folder needs that ' +
-        'folder’s <b>number</b>. eLabNext doesn’t show folder numbers directly, so:</p>' +
+        'folder’s <b>number</b>. To find it:</p>' +
         // Steps are numbered in the markup rather than by <ol>: the host stylesheet strips list
         // markers, which left the instructions as unnumbered indented lines.
         '<div class="bpt-hint bpt-steps">' +
@@ -1902,15 +1902,13 @@ var BioprintTracker = {};
             const line = document.getElementById('bpt-folder-current');
             if (line) line.innerHTML = describe(id);
             renderTable();
-            status(`Saved. New uploads will go to <b>${describe(id)}</b>. Files already uploaded stay ` +
-              'where they are: eLabNext has no way to move a file between folders.', 'ok');
+            status(`Saved. New uploads will go to <b>${describe(id)}</b>.`, 'ok');
           }).catch(err => {
             setButtonsDisabled(false);
             const msg = (err && err.message) || String(err);
             if (/\(403\)|forbidden/i.test(msg)) {
-              status('Not saved: your account is not allowed to change this add-on’s settings. Ask an ' +
-                'eLabNext administrator to choose the folder, or to install the add-on for your group.',
-                'error');
+              status('Not saved: this account was not permitted to change the add-on’s settings. Ask ' +
+                'an administrator to choose the folder.', 'error');
             } else {
               status(`Not saved: ${esc(msg)}`, 'error');
             }
@@ -1933,9 +1931,9 @@ var BioprintTracker = {};
             renderTable();
           }
           if (!installedRecord) {
-            status('This add-on is not installed in this environment (side-loading does this), so the ' +
-              'choice cannot be saved from here. Note the number and set it in the add-on’s Configure ' +
-              'screen instead.', 'error');
+            status('No installed record was found for this add-on here, so the choice cannot be saved ' +
+              'from this screen. Note the folder number and set it in the add-on’s Configure screen ' +
+              'instead.', 'error');
           }
         });
       }
